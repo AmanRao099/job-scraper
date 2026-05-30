@@ -62,15 +62,62 @@ except:
 # SEARCH URLS
 # =========================================
 
-NAUKRI_URL = (
-    "https://www.naukri.com/"
-    "fresher-software-engineer-jobs"
-)
+NAUKRI_URLS = [
 
-LINKEDIN_URL = (
-    "https://www.linkedin.com/jobs/search/"
-    "?keywords=fresher%20software%20engineer"
-)
+    "https://www.naukri.com/fresher-software-engineer-jobs",
+    "https://www.naukri.com/fresher-software-developer-jobs",
+    "https://www.naukri.com/fresher-python-developer-jobs",
+    "https://www.naukri.com/fresher-java-developer-jobs",
+    "https://www.naukri.com/fresher-full-stack-developer-jobs",
+    "https://www.naukri.com/fresher-react-developer-jobs",
+    "https://www.naukri.com/fresher-data-analyst-jobs",
+    "https://www.naukri.com/fresher-data-scientist-jobs",
+    "https://www.naukri.com/fresher-machine-learning-engineer-jobs",
+    "https://www.naukri.com/fresher-ai-engineer-jobs",
+    "https://www.naukri.com/fresher-devops-engineer-jobs",
+    "https://www.naukri.com/fresher-cloud-engineer-jobs",
+    "https://www.naukri.com/fresher-qa-engineer-jobs"
+
+]
+
+LINKEDIN_SEARCHES = [
+
+    "software engineer",
+    "software developer",
+
+    "associate software engineer",
+
+    "python developer",
+    "java developer",
+
+    "backend developer",
+    "frontend developer",
+
+    "react developer",
+
+    "full stack developer",
+
+    "data analyst",
+    "business analyst",
+
+    "data scientist",
+
+    "machine learning engineer",
+    "ai engineer",
+
+    "cloud engineer",
+
+    "qa engineer",
+    "test engineer",
+
+    "application support engineer",
+
+    "graduate engineer trainee",
+
+    "software engineer intern",
+    "developer intern"
+
+]
 
 
 # =========================================
@@ -101,307 +148,393 @@ with sync_playwright() as p:
 
     page = context.new_page()
 
-    # =========================================
-    # NAUKRI SCRAPING
-    # =========================================
+# =========================================
+# NAUKRI SCRAPING
+# =========================================
 
-    print("\nOpening Naukri...\n")
-
-    page.goto(
-        NAUKRI_URL,
-        timeout=60000
-    )
-
-    time.sleep(8)
-
-    page.mouse.wheel(0, 4000)
-
-    time.sleep(3)
-
-    naukri_html = page.content()
-
-    naukri_jobs = extract_job_cards(
-        naukri_html
-    )
-
-    print(
-        f"Naukri Jobs Found: "
-        f"{len(naukri_jobs)}"
-    )
-
-    for job in naukri_jobs:
+    for NAUKRI_URL in NAUKRI_URLS:
 
         try:
 
-            if not job["apply_link"]:
-                continue
-
-            if not is_tech_job(job["title"]):
-                continue
-
-            if not is_fresher_job(
-                job["title"],
-                job["experience"]
-            ):
-                continue
-
-            unique_key = (
-                job["title"].lower().strip() +
-                job["company"].lower().strip()
-            )
-
-            if unique_key in existing_jobs:
-
-                print(
-                    f"Duplicate Skipped: "
-                    f"{job['title']}"
-                )
-
-                continue
-
             print(
-                f"Naukri Opening: "
-                f"{job['title']}"
+                f"\nOpening Naukri: "
+                f"{NAUKRI_URL}"
             )
 
-            time.sleep(
-                random.uniform(2, 5)
-            )
-
-            job_page = context.new_page()
-
-            job_page.goto(
-                job["apply_link"],
+            page.goto(
+                NAUKRI_URL,
                 timeout=60000
             )
 
-            time.sleep(5)
+            time.sleep(8)
 
-            job_html = job_page.content()
-
-            if is_dead_job(job_html):
-
-                print(
-                    f"Dead Job Skipped: "
-                    f"{job['title']}"
-                )
-
-                continue
-
-            description = (
-                extract_job_description(
-                    job_html
-                )
+            page.mouse.wheel(
+                0,
+                4000
             )
 
-            skills = extract_skills(
-                description
+            time.sleep(3)
+
+            naukri_html = page.content()
+
+            naukri_jobs = extract_job_cards(
+                naukri_html
             )
-
-            category = categorize_job(
-                job["title"],
-                description
-            )
-
-            job["description"] = description
-
-            job["skills"] = skills
-
-            job["category"] = category
-
-            job["source"] = "naukri"
-
-            job["scraped_at"] = str(
-                datetime.now()
-            )
-
-            jobs_data.append(job)
-
-            existing_jobs.add(unique_key)
 
             print(
-                f"Saved Naukri: "
-                f"{job['title']}"
+                f"Naukri Jobs Found: "
+                f"{len(naukri_jobs)}"
             )
 
-            job_page.close()
+            for job in naukri_jobs:
+
+                try:
+
+                    if not job["apply_link"]:
+                        continue
+
+                    if not is_tech_job(
+                        job["title"]
+                    ):
+                        continue
+
+                    if not is_fresher_job(
+                        job["title"],
+                        job["experience"]
+                    ):
+                        continue
+
+                    unique_key = (
+                        job["title"].lower().strip()
+                        +
+                        job["company"].lower().strip()
+                    )
+
+                    if unique_key in existing_jobs:
+
+                        continue
+
+                    print(
+                        f"Naukri Opening: "
+                        f"{job['title']}"
+                    )
+
+                    time.sleep(
+                        random.uniform(2, 5)
+                    )
+
+                    job_page = context.new_page()
+
+                    try:
+
+                        job_page.goto(
+                            job["apply_link"],
+                            timeout=60000
+                        )
+
+                        time.sleep(5)
+
+                        job_html = (
+                            job_page.content()
+                        )
+
+                        if is_dead_job(
+                            job_html
+                        ):
+
+                            continue
+
+                        description = (
+                            extract_job_description(
+                                job_html
+                            )
+                        )
+
+                        skills = (
+                            extract_skills(
+                                description
+                            )
+                        )
+
+                        category = (
+                            categorize_job(
+                                job["title"],
+                                description
+                            )
+                        )
+
+                        job["description"] = (
+                            description
+                        )
+
+                        job["skills"] = skills
+
+                        job["category"] = (
+                            category
+                        )
+
+                        job["source"] = (
+                            "naukri"
+                        )
+
+                        job["scraped_at"] = str(
+                            datetime.now()
+                        )
+
+                        jobs_data.append(
+                            job
+                        )
+
+                        existing_jobs.add(
+                            unique_key
+                        )
+
+                        with open(
+                            "output/jobs.json",
+                            "w",
+                            encoding="utf-8"
+                        ) as f:
+
+                            json.dump(
+                                jobs_data,
+                                f,
+                                indent=4,
+                                ensure_ascii=False
+                            )
+                        print(
+                            f"Saved Naukri: "
+                            f"{job['title']} | "
+                            f"{category}"
+                        )
+
+                    finally:
+
+                        job_page.close()
+
+                except Exception as e:
+
+                    print(
+                        f"Naukri Job Error: "
+                        f"{e}"
+                    )
 
         except Exception as e:
 
             print(
-                f"Naukri Error: {e}"
+                f"Naukri Search Error: "
+                f"{e}"
             )
 
     # =========================================
     # LINKEDIN SCRAPING
     # =========================================
 
-    print("\nOpening LinkedIn...\n")
+    for search_term in LINKEDIN_SEARCHES:
 
-    try:
+        try:
 
-        page.goto(
-            LINKEDIN_URL,
-            timeout=60000
-        )
+            linkedin_url = (
+                "https://www.linkedin.com/jobs/search/"
+                f"?keywords={search_term.replace(' ', '%20')}"
+                "&location=India"
+                "&geoId=102713980"
+                "&f_E=2"
+            )
 
-        time.sleep(8)
+            print(
+                f"\nSearching LinkedIn: "
+                f"{search_term}"
+            )
 
-        for _ in range(3):
+            page.goto(
+                linkedin_url,
+                timeout=60000
+            )
 
-            page.mouse.wheel(0, 3000)
+            time.sleep(8)
 
-            time.sleep(2)
+            for _ in range(5):
 
-        linkedin_html = page.content()
-
-        with open(
-            "output/linkedin_debug.html",
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(linkedin_html)
-
-        linkedin_jobs = extract_linkedin_jobs(
-            linkedin_html
-        )
-
-        print(
-            f"LinkedIn Jobs Found: "
-            f"{len(linkedin_jobs)}"
-        )
-
-        for job in linkedin_jobs:
-
-            try:
-
-                if not job["apply_link"]:
-                    continue
-
-                if not is_tech_job(job["title"]):
-                    continue
-
-                if not is_fresher_job(
-                    job["title"],
-                    job["experience"]
-                ):
-                    continue
-
-                unique_key = (
-                    job["title"].lower().strip() +
-                    job["company"].lower().strip()
+                page.mouse.wheel(
+                    0,
+                    3000
                 )
 
-                if unique_key in existing_jobs:
+                time.sleep(2)
+
+            linkedin_html = page.content()
+
+            linkedin_jobs = (
+                extract_linkedin_jobs(
+                    linkedin_html
+                )
+            )
+
+            print(
+                f"LinkedIn Jobs Found: "
+                f"{len(linkedin_jobs)}"
+            )
+
+            for job in linkedin_jobs:
+
+                try:
+
+                    if not job["apply_link"]:
+                        continue
+
+                    if not is_tech_job(
+                        job["title"]
+                    ):
+                        continue
+                    if (
+                        job["location"]
+                        and
+                        "india" not in job["location"].lower()
+                        ):
+                        continue
+
+                    if not is_fresher_job(
+                        job["title"],
+                        job["experience"]
+                    ):
+                        continue
+
+                    unique_key = (
+                        job["title"].lower().strip()
+                        +
+                        job["company"].lower().strip()
+                    )
+
+                    if unique_key in existing_jobs:
+
+                        continue
 
                     print(
-                        f"Duplicate Skipped: "
+                        f"LinkedIn Opening: "
                         f"{job['title']}"
                     )
 
-                    continue
+                    job_page = context.new_page()
 
-                print(
-                    f"LinkedIn Opening: "
-                    f"{job['title']}"
-                )
+                    try:
 
-                time.sleep(
-                    random.uniform(3, 6)
-                )
+                        job_page.goto(
+                            job["apply_link"],
+                            timeout=60000
+                        )
 
-                job_page = context.new_page()
+                        time.sleep(5)
 
-                job_page.goto(
-                    job["apply_link"],
-                    timeout=60000
-                )
+                        job_html = (
+                            job_page.content()
+                        )
 
-                time.sleep(5)
+                        if is_dead_job(
+                            job_html
+                        ):
 
-                job_html = job_page.content()
+                            continue
 
-                if is_dead_job(job_html):
+                        description = (
+                            extract_linkedin_description(
+                                job_html
+                            )
+                        )
+
+                        skills = (
+                            extract_skills(
+                                description
+                            )
+                        )
+
+                        category = (
+                            categorize_job(
+                                job["title"],
+                                description
+                            )
+                        )
+
+                        job["description"] = (
+                            description
+                        )
+
+                        job["skills"] = skills
+
+                        job["category"] = (
+                            category
+                        )
+
+                        job["source"] = (
+                            "linkedin"
+                        )
+
+                        job["scraped_at"] = str(
+                            datetime.now()
+                        )
+
+                        jobs_data.append(
+                            job
+                        )
+
+                        existing_jobs.add(
+                            unique_key
+                        )
+                        with open(
+                            "output/jobs.json",
+                            "w",
+                            encoding="utf-8"
+                        ) as f:
+
+                            json.dump(
+                                jobs_data,
+                                f,
+                                indent=4,
+                                ensure_ascii=False
+                            )
+
+                        print(
+                            f"Saved LinkedIn: "
+                            f"{job['title']} | "
+                            f"{job['location']} | "
+                            f"{category}"
+                        )
+
+                    finally:
+
+                        job_page.close()
+
+                except Exception as e:
 
                     print(
-                        f"Dead Job Skipped: "
-                        f"{job['title']}"
+                        f"LinkedIn Job Error: "
+                        f"{e}"
                     )
 
-                    continue
+        except Exception as e:
 
-                description = (
-                    extract_linkedin_description(
-                        job_html
-                    )
-                )
+            print(
+                f"LinkedIn Search Error: "
+                f"{e}")
 
-                skills = extract_skills(
-                    description
-                )
 
-                category = categorize_job(
-                    job["title"],
-                    description
-                )
+    # =========================================
+    # SAVE FINAL JSON
+    # =========================================
 
-                job["description"] = description
+    with open(
+        "output/jobs.json",
+        "w",
+        encoding="utf-8"
+    ) as f:
 
-                job["skills"] = skills
-
-                job["category"] = category
-
-                job["source"] = "linkedin"
-
-                job["scraped_at"] = str(
-                    datetime.now()
-                )
-
-                jobs_data.append(job)
-
-                existing_jobs.add(unique_key)
-
-                print(
-                    f"Saved LinkedIn: "
-                    f"{job['title']}"
-                )
-
-                job_page.close()
-
-            except Exception as e:
-
-                print(
-                    f"LinkedIn Job Error: {e}"
-                )
-
-    except Exception as e:
-
-        print(
-            f"LinkedIn Main Error: {e}"
+        json.dump(
+            jobs_data,
+            f,
+            indent=4,
+            ensure_ascii=False
         )
 
-    browser.close()
-
-
-# =========================================
-# SAVE FINAL JSON
-# =========================================
-
-with open(
-    "output/jobs.json",
-    "w",
-    encoding="utf-8"
-) as f:
-
-    json.dump(
-        jobs_data,
-        f,
-        indent=4,
-        ensure_ascii=False
+    print(
+        f"\nSuccessfully saved "
+        f"{len(jobs_data)} total jobs"
     )
-
-print(
-    f"\nSuccessfully saved "
-    f"{len(jobs_data)} total jobs"
-)

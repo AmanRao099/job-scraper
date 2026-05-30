@@ -1,5 +1,3 @@
-# categorizer.py
-
 # =========================================
 # CATEGORY DATABASE
 # =========================================
@@ -7,7 +5,6 @@
 CATEGORIES = {
 
     "Backend": [
-
         "python",
         "django",
         "flask",
@@ -16,54 +13,71 @@ CATEGORIES = {
         "backend",
         "api",
         "java",
-        "spring"
+        "spring",
+        "express"
     ],
 
     "Frontend": [
-
         "react",
         "angular",
         "vue",
         "frontend",
         "javascript",
         "typescript",
-        "ui"
+        "ui",
+        "html",
+        "css"
     ],
 
     "Full Stack": [
-
-        "full stack"
+        "full stack",
+        "fullstack"
     ],
 
-    "Data Science": [
-
+    "Data Science / AI": [
         "data science",
         "machine learning",
         "deep learning",
         "tensorflow",
         "pytorch",
         "data analyst",
+        "data scientist",
         "ai",
-        "ml"
+        "ml",
+        "artificial intelligence",
+        "llm",
+        "large language model",
+        "generative ai",
+        "genai",
+        "langchain",
+        "rag",
+        "ollama",
+        "openai",
+        "gemini",
+        "vector database",
+        "hugging face"
     ],
 
-    "DevOps": [
-
+    "DevOps / Cloud": [
         "docker",
         "kubernetes",
         "aws",
         "azure",
         "gcp",
         "devops",
-        "cloud"
+        "cloud",
+        "terraform",
+        "jenkins",
+        "ci/cd"
     ],
 
     "Mobile Development": [
-
         "android",
         "ios",
         "flutter",
-        "react native"
+        "react native",
+        "kotlin",
+        "swift"
     ]
 }
 
@@ -78,11 +92,25 @@ def categorize_job(title, description):
         title + " " + description
     ).lower()
 
+    scores = {}
+
     for category, keywords in CATEGORIES.items():
+
+        score = 0
 
         for keyword in keywords:
 
             if keyword in combined:
-                return category
+                score += 1
 
-    return "Other"
+        scores[category] = score
+
+    best_category = max(
+        scores,
+        key=scores.get
+    )
+
+    if scores[best_category] == 0:
+        return "Other"
+
+    return best_category

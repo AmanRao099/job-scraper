@@ -1,5 +1,3 @@
-# parser.py
-
 import re
 
 
@@ -46,11 +44,31 @@ SKILLS = [
     "PyTorch",
 
     "Machine Learning",
+    "Deep Learning",
     "Data Science",
+
+    "OpenAI",
+    "Gemini",
+    "LangChain",
+    "LlamaIndex",
+    "Hugging Face",
+    "RAG",
+    "LLM",
+    "Generative AI",
 
     "Git",
     "Linux",
-    "CI/CD"
+    "CI/CD",
+
+    "Power BI",
+    "Tableau",
+    "Pandas",
+    "NumPy",
+    "Scikit-Learn",
+
+    "Android",
+    "Flutter",
+    "React Native"
 ]
 
 
@@ -63,18 +81,42 @@ TECH_KEYWORDS = [
     "developer",
     "engineer",
     "software",
+
     "frontend",
     "backend",
     "full stack",
+
     "data",
+    "data analyst",
+    "data scientist",
+
+    "machine learning",
+    "deep learning",
+
     "ai",
     "ml",
+    "artificial intelligence",
+
+    "genai",
+    "generative ai",
+    "llm",
+
     "cloud",
     "devops",
+
     "analyst",
     "programmer",
+
     "intern",
-    "trainee"
+    "trainee",
+
+    "python",
+    "react",
+    "java",
+
+    "research engineer",
+    "ai engineer",
+    "ml engineer"
 ]
 
 
@@ -86,13 +128,25 @@ FRESHER_KEYWORDS = [
 
     "fresher",
     "freshers",
+
     "0-1",
     "0 - 1",
+
     "entry level",
+    "entry-level",
+
     "graduate",
+    "new graduate",
+
     "intern",
+    "internship",
+
     "trainee",
-    "junior"
+
+    "junior",
+
+    "associate engineer",
+    "associate developer"
 ]
 
 
@@ -112,7 +166,11 @@ def extract_skills(description):
 
             found_skills.append(skill)
 
-    return list(set(found_skills))
+    return sorted(
+        list(
+            set(found_skills)
+        )
+    )
 
 
 # =========================================
@@ -126,6 +184,7 @@ def is_tech_job(title):
     for keyword in TECH_KEYWORDS:
 
         if keyword in title_lower:
+
             return True
 
     return False
@@ -144,6 +203,7 @@ def is_fresher_job(title, experience):
     for keyword in FRESHER_KEYWORDS:
 
         if keyword in combined:
+
             return True
 
     exp_match = re.search(
@@ -152,6 +212,7 @@ def is_fresher_job(title, experience):
     )
 
     if exp_match:
+
         return True
 
     return False

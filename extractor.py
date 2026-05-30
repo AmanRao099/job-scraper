@@ -1,5 +1,3 @@
-# extractor.py
-
 from bs4 import BeautifulSoup
 
 
@@ -17,6 +15,12 @@ def extract_job_cards(html):
         "div",
         class_="cust-job-tuple"
     )
+
+    if not cards:
+
+        cards = soup.find_all(
+            "article"
+        )
 
     for card in cards:
 
@@ -45,6 +49,26 @@ def extract_job_cards(html):
             class_="sal-wrap"
         )
 
+        apply_link = ""
+
+        if title_tag:
+
+            apply_link = title_tag.get(
+                "href",
+                ""
+            )
+
+            if (
+                apply_link
+                and
+                apply_link.startswith("/")
+            ):
+
+                apply_link = (
+                    "https://www.naukri.com"
+                    + apply_link
+                )
+
         job = {
 
             "title":
@@ -68,16 +92,19 @@ def extract_job_cards(html):
                 if salary_tag else "",
 
             "apply_link":
-                title_tag.get("href", "")
-                if title_tag else "",
+                apply_link,
 
-            "description": "",
+            "description":
+                "",
 
-            "skills": [],
+            "skills":
+                [],
 
-            "category": "",
+            "category":
+                "",
 
-            "source": "naukri"
+            "source":
+                "naukri"
         }
 
         jobs.append(job)
@@ -91,9 +118,10 @@ def extract_job_cards(html):
 
 def extract_job_description(html):
 
-    soup = BeautifulSoup(html, "lxml")
-
-    description = ""
+    soup = BeautifulSoup(
+        html,
+        "lxml"
+    )
 
     possible_classes = [
 
@@ -101,6 +129,7 @@ def extract_job_description(html):
         "dang-inner-html",
         "job-desc",
         "styles_job-desc-container__txpYf"
+
     ]
 
     for class_name in possible_classes:
@@ -112,14 +141,17 @@ def extract_job_description(html):
 
         if desc_div:
 
-            description = desc_div.get_text(
+            return desc_div.get_text(
                 separator=" ",
                 strip=True
             )
 
-            break
+    body = soup.get_text(
+        separator=" ",
+        strip=True
+    )
 
-    return description
+    return body[:10000]
 
 
 # =========================================
@@ -128,7 +160,10 @@ def extract_job_description(html):
 
 def extract_linkedin_jobs(html):
 
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(
+        html,
+        "lxml"
+    )
 
     jobs = []
 
@@ -136,6 +171,12 @@ def extract_linkedin_jobs(html):
         "div",
         class_="base-card"
     )
+
+    if not cards:
+
+        cards = soup.find_all(
+            "li"
+        )
 
     for card in cards:
 
@@ -154,7 +195,19 @@ def extract_linkedin_jobs(html):
             class_="job-search-card__location"
         )
 
-        link_tag = card.find("a")
+        link_tag = card.find(
+            "a",
+            href=True
+        )
+
+        apply_link = ""
+
+        if link_tag:
+
+            apply_link = link_tag.get(
+                "href",
+                ""
+            )
 
         job = {
 
@@ -177,8 +230,7 @@ def extract_linkedin_jobs(html):
                 "",
 
             "apply_link":
-                link_tag.get("href", "")
-                if link_tag else "",
+                apply_link,
 
             "description":
                 "",
@@ -193,7 +245,13 @@ def extract_linkedin_jobs(html):
                 "linkedin"
         }
 
-        jobs.append(job)
+        if (
+            job["title"]
+            and
+            job["company"]
+        ):
+
+            jobs.append(job)
 
     return jobs
 
@@ -204,15 +262,18 @@ def extract_linkedin_jobs(html):
 
 def extract_linkedin_description(html):
 
-    soup = BeautifulSoup(html, "lxml")
-
-    description = ""
+    soup = BeautifulSoup(
+        html,
+        "lxml"
+    )
 
     possible_classes = [
 
         "show-more-less-html__markup",
         "description__text",
-        "jobs-description"
+        "jobs-description",
+        "jobs-box__html-content"
+
     ]
 
     for class_name in possible_classes:
@@ -224,11 +285,14 @@ def extract_linkedin_description(html):
 
         if desc_div:
 
-            description = desc_div.get_text(
+            return desc_div.get_text(
                 separator=" ",
                 strip=True
             )
 
-            break
+    body = soup.get_text(
+        separator=" ",
+        strip=True
+    )
 
-    return description
+    return body[:10000]
