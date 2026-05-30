@@ -45,8 +45,7 @@ job_scraper/
 ├── README.md
 │
 ├── output/
-│   ├── jobs.json
-│   └── linkedin_debug.html
+│   └── jobs.json
 ```
 
 ---
