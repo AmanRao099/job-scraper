@@ -1,5 +1,6 @@
 # main.py
 
+# pyrefly: ignore [missing-import]
 from playwright.sync_api import sync_playwright
 
 from extractor import (
@@ -37,21 +38,22 @@ existing_jobs = set()
 try:
 
     with open(
-        "output/jobs.json",
+        "output/jobs.jsonl",
         "r",
         encoding="utf-8"
     ) as f:
 
-        jobs_data = json.load(f)
+        for line in f:
+            if line.strip():
+                job = json.loads(line)
+                jobs_data.append(job)
 
-        for job in jobs_data:
+                unique_key = (
+                    job["title"].lower().strip() +
+                    job["company"].lower().strip()
+                )
 
-            unique_key = (
-                job["title"].lower().strip() +
-                job["company"].lower().strip()
-            )
-
-            existing_jobs.add(unique_key)
+                existing_jobs.add(unique_key)
 
 except:
 
@@ -290,17 +292,12 @@ with sync_playwright() as p:
                         )
 
                         with open(
-                            "output/jobs.json",
-                            "w",
+                            "output/jobs.jsonl",
+                            "a",
                             encoding="utf-8"
                         ) as f:
 
-                            json.dump(
-                                jobs_data,
-                                f,
-                                indent=4,
-                                ensure_ascii=False
-                            )
+                            f.write(json.dumps(job, ensure_ascii=False) + "\n")
                         print(
                             f"Saved Naukri: "
                             f"{job['title']} | "
@@ -480,17 +477,12 @@ with sync_playwright() as p:
                             unique_key
                         )
                         with open(
-                            "output/jobs.json",
-                            "w",
+                            "output/jobs.jsonl",
+                            "a",
                             encoding="utf-8"
                         ) as f:
 
-                            json.dump(
-                                jobs_data,
-                                f,
-                                indent=4,
-                                ensure_ascii=False
-                            )
+                            f.write(json.dumps(job, ensure_ascii=False) + "\n")
 
                         print(
                             f"Saved LinkedIn: "
@@ -517,22 +509,7 @@ with sync_playwright() as p:
                 f"{e}")
 
 
-    # =========================================
-    # SAVE FINAL JSON
-    # =========================================
-
-    with open(
-        "output/jobs.json",
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            jobs_data,
-            f,
-            indent=4,
-            ensure_ascii=False
-        )
+    # Final summary handled dynamically as we append
 
     print(
         f"\nSuccessfully saved "

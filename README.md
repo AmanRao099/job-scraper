@@ -163,7 +163,35 @@ playwright install
 
 # How To Run
 
-Run the scraper manually:
+The scraper now includes a React UI and a FastAPI backend. You need to run both to use the dashboard.
+
+## 1. Start the Backend
+
+In a terminal, ensure your virtual environment is active and run:
+
+```bash
+python api.py
+```
+
+The backend server will start on `http://localhost:8000`.
+
+## 2. Start the React UI
+
+Open a *new* terminal window, navigate to the `UI` folder, install Node dependencies, and start the development server:
+
+```bash
+cd UI
+npm install
+npm run dev
+```
+
+Visit the local URL provided by Vite (usually `http://localhost:5173`) to view the dashboard and start scraping!
+
+---
+
+## (Optional) Run without UI:
+
+If you prefer to run the scraper directly from the terminal without the web interface:
 
 ```bash
 python main.py
