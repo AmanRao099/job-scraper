@@ -71,6 +71,34 @@ def test_cors_origins_accept_comma_separated_values(monkeypatch):
     assert Settings().cors_origins == ["https://a.vercel.app", "https://b.vercel.app"]
 
 
+def test_direct_postgres_uses_prepared_statement_caching(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@ep-abc.ap-southeast-1.aws.neon.tech/db")
+    settings = Settings()
+
+    assert not settings.is_pooled_postgres
+    assert "prepared_statement_cache_size" not in settings.db_connect_args
+
+
+def test_pooled_postgres_disables_prepared_statements(monkeypatch):
+    """PgBouncer transaction mode breaks asyncpg's numbered statement names.
+
+    The symptom is an intermittent DuplicatePreparedStatementError under
+    concurrency, so this has to be handled by configuration rather than caught.
+    """
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgres://u:p@ep-abc-pooler.c-3.ap-southeast-1.aws.neon.tech/db?sslmode=require",
+    )
+    settings = Settings()
+    args = settings.db_connect_args
+
+    assert settings.is_pooled_postgres
+    assert args["prepared_statement_cache_size"] == 0
+    # Unique per call, so two clients on one backend cannot collide.
+    name_func = args["prepared_statement_name_func"]
+    assert name_func() != name_func()
+
+
 def test_sqlite_connect_args_keep_the_busy_timeout(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///./data/jobs.db")
     settings = Settings()

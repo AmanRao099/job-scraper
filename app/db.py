@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from sqlalchemy import event, text
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -30,7 +31,11 @@ class Base(DeclarativeBase):
 
 
 _engine_options: dict = {}
-if not settings.is_sqlite:
+if settings.is_pooled_postgres:
+    # PgBouncer already pools on the server side; a second pool in front of it
+    # just holds connections open against the free tier's cap for no gain.
+    _engine_options = {"poolclass": NullPool}
+elif not settings.is_sqlite:
     # Free Postgres tiers (Neon, Supabase) suspend an idle compute and drop the
     # TCP connection with it. Pre-ping plus a short recycle means the next
     # request transparently reconnects instead of raising ConnectionDoesNotExist.

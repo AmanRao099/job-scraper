@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from uuid import uuid4
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -167,15 +168,36 @@ class Settings(BaseSettings):
         return self.database_url.startswith("postgresql")
 
     @property
+    def is_pooled_postgres(self) -> bool:
+        """True for a PgBouncer endpoint (Neon and Supabase both mark it '-pooler')."""
+        return self.is_postgres and "-pooler." in self.database_url
+
+    @property
     def db_connect_args(self) -> dict:
         if self.is_sqlite:
             return {"timeout": 30}
-        if self.is_postgres:
-            # Every free managed Postgres requires TLS. asyncpg spells it `ssl`,
-            # and "require" encrypts without verifying the CA - which is what
-            # `sslmode=require` in the provider's own URL already meant.
-            return {"ssl": "require", "server_settings": {"application_name": self.app_name}}
-        return {}
+        if not self.is_postgres:
+            return {}
+
+        # Every free managed Postgres requires TLS. asyncpg spells it `ssl`,
+        # and "require" encrypts without verifying the CA - which is what
+        # `sslmode=require` in the provider's own URL already meant.
+        args: dict = {
+            "ssl": "require",
+            "server_settings": {"application_name": self.app_name},
+        }
+
+        if self.is_pooled_postgres:
+            # PgBouncer in transaction mode hands successive queries to
+            # different backends, so asyncpg's numerically-named prepared
+            # statements collide across clients. The failure is intermittent -
+            # DuplicatePreparedStatementError under load, nothing at all on a
+            # quiet service - so make it structurally impossible rather than
+            # relying on the direct endpoint being configured.
+            args["prepared_statement_cache_size"] = 0
+            args["prepared_statement_name_func"] = lambda: f"__asyncpg_{uuid4()}__"
+
+        return args
 
 
 @lru_cache(maxsize=1)
