@@ -305,9 +305,12 @@ async def reap_orphaned_runs(session: AsyncSession, older_than_minutes: int | No
     at `running` forever - and `has_running_scrape` would then reject every
     future scrape with a 409, permanently.
 
-    The API calls this at startup with no age limit: nothing can still be
-    running in a process that has just booted. The CLI passes an age limit
-    instead, so it never kills a scrape that a live API server is running.
+    Both callers pass an age limit. It is tempting for the API to skip one at
+    startup - nothing can still be running in a process that has just booted -
+    but that reasoning only holds while a single process owns every scrape.
+    Once the scraper runs elsewhere (a CI schedule writing to the same
+    database), an unbounded reap on boot will mark a live run failed and hand
+    its lock to a second, concurrent scrape.
     """
     stmt = update(ScrapeRun).where(ScrapeRun.status == "running")
     if older_than_minutes is not None:

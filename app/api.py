@@ -64,9 +64,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     await init_db()
 
-    # A run row can only say "running" at startup if the previous process died.
+    # Clear runs abandoned by a process that died. Age-limited because this
+    # server is no longer the only thing that scrapes: a scheduled run in CI can
+    # be perfectly healthy while this instance cold-starts underneath it, and
+    # clearing it would both mislabel it failed and release its lock.
     async with SessionLocal() as session:
-        orphans = await repo.reap_orphaned_runs(session)
+        orphans = await repo.reap_orphaned_runs(
+            session, older_than_minutes=settings.orphan_run_after_minutes
+        )
         await session.commit()
     if orphans:
         logger.warning("Marked %s interrupted scrape run(s) as failed", orphans)

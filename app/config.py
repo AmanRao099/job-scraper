@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scrape_interval_hours: float = 6.0
     scrape_on_startup: bool = False
+    # How long a run may sit at "running" before another process may declare it
+    # dead. Must exceed the longest possible scrape: when the scraper runs
+    # elsewhere (GitHub Actions), the API cannot tell a live run from an
+    # abandoned one, and clearing a live one also releases its lock.
+    orphan_run_after_minutes: int = 90
     # Jobs not seen in a scrape for this long are marked inactive.
     stale_after_days: int = 21
     # Inactive jobs older than this are deleted outright.

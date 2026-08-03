@@ -208,6 +208,31 @@ class TestRunRecovery:
             run = await repo.latest_run(s)
             assert run.status == "failed" and run.error
 
+    async def test_startup_reap_spares_a_scrape_running_elsewhere(self, session):
+        """A cold start must not fail a run owned by another process.
+
+        The scraper runs in CI against this same database, so an unbounded reap
+        on boot would mark a healthy run failed and release its lock to a second
+        concurrent scrape. The window has to exceed the longest possible scrape.
+        """
+        from app.config import settings
+
+        assert settings.orphan_run_after_minutes >= 60
+
+        async with SessionLocal() as s:
+            await repo.create_run(s, ["naukri"], "scheduled")
+            await s.commit()
+
+        async with SessionLocal() as s:
+            reaped = await repo.reap_orphaned_runs(
+                s, older_than_minutes=settings.orphan_run_after_minutes
+            )
+            await s.commit()
+
+        assert reaped == 0
+        async with SessionLocal() as s:
+            assert await repo.has_running_scrape(s) is not None
+
     async def test_age_limit_spares_a_freshly_started_run(self, session):
         async with SessionLocal() as s:
             await repo.create_run(s, ["naukri"], "manual")
