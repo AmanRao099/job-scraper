@@ -1,2 +1,25 @@
+# python
 /venv
-/__pycache__
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# data + secrets
+/data
+/output
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# node
+node_modules/
+UI/dist/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

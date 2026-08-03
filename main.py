@@ -1,517 +1,266 @@
-# main.py
+#!/usr/bin/env python
+"""CLI entry point.
 
-# pyrefly: ignore [missing-import]
-from playwright.sync_api import sync_playwright
+    python main.py serve                 # run the API (what production runs)
+    python main.py scrape                # one-off scrape into the database
+    python main.py scrape --limit 5      # smoke test with 5 search queries
+    python main.py export jobs.jsonl     # dump the database
+    python main.py import output/jobs.jsonl   # backfill from the old format
+    python main.py stats                 # quick counts
+"""
 
-from extractor import (
-    extract_job_cards,
-    extract_job_description,
-    extract_linkedin_jobs,
-    extract_linkedin_description
-)
+from __future__ import annotations
 
-from parser import (
-    extract_skills,
-    is_tech_job,
-    is_fresher_job
-)
-
-from categorizer import categorize_job
-
-from cleanup import is_dead_job
-
-from datetime import datetime
-
+import argparse
+import asyncio
 import json
-import time
-import random
+import logging
+import sys
+from pathlib import Path
+
+from app.config import settings
+
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+)
+logger = logging.getLogger("job_scraper")
 
 
-# =========================================
-# LOAD EXISTING JOBS
-# =========================================
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 
-jobs_data = []
+def cmd_serve(args: argparse.Namespace) -> int:
+    import uvicorn
 
-existing_jobs = set()
-
-try:
-
-    with open(
-        "output/jobs.jsonl",
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        for line in f:
-            if line.strip():
-                job = json.loads(line)
-                jobs_data.append(job)
-
-                unique_key = (
-                    job["title"].lower().strip() +
-                    job["company"].lower().strip()
-                )
-
-                existing_jobs.add(unique_key)
-
-except:
-
-    jobs_data = []
-
-
-# =========================================
-# SEARCH URLS
-# =========================================
-
-NAUKRI_URLS = [
-
-    "https://www.naukri.com/fresher-software-engineer-jobs",
-    "https://www.naukri.com/fresher-software-developer-jobs",
-    "https://www.naukri.com/fresher-python-developer-jobs",
-    "https://www.naukri.com/fresher-java-developer-jobs",
-    "https://www.naukri.com/fresher-full-stack-developer-jobs",
-    "https://www.naukri.com/fresher-react-developer-jobs",
-    "https://www.naukri.com/fresher-data-analyst-jobs",
-    "https://www.naukri.com/fresher-data-scientist-jobs",
-    "https://www.naukri.com/fresher-machine-learning-engineer-jobs",
-    "https://www.naukri.com/fresher-ai-engineer-jobs",
-    "https://www.naukri.com/fresher-devops-engineer-jobs",
-    "https://www.naukri.com/fresher-cloud-engineer-jobs",
-    "https://www.naukri.com/fresher-qa-engineer-jobs"
-
-]
-
-LINKEDIN_SEARCHES = [
-
-    "software engineer",
-    "software developer",
-
-    "associate software engineer",
-
-    "python developer",
-    "java developer",
-
-    "backend developer",
-    "frontend developer",
-
-    "react developer",
-
-    "full stack developer",
-
-    "data analyst",
-    "business analyst",
-
-    "data scientist",
-
-    "machine learning engineer",
-    "ai engineer",
-
-    "cloud engineer",
-
-    "qa engineer",
-    "test engineer",
-
-    "application support engineer",
-
-    "graduate engineer trainee",
-
-    "software engineer intern",
-    "developer intern"
-
-]
-
-
-# =========================================
-# START PLAYWRIGHT
-# =========================================
-
-with sync_playwright() as p:
-
-    browser = p.chromium.launch(
-        headless=False
+    uvicorn.run(
+        "app.api:app",
+        host=args.host or settings.api_host,
+        port=args.port or settings.api_port,
+        reload=args.reload,
+        log_level=settings.log_level.lower(),
     )
+    return 0
 
-    context = browser.new_context(
 
-        user_agent=(
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/136.0.0.0 Safari/537.36"
-        ),
+async def _scrape(args: argparse.Namespace) -> int:
+    from app.db import init_db, session_scope
+    from app.events import broker
+    from app.pipeline import ScrapeAlreadyRunning, run_scrape, resolve_sources, start_run
+    from app.repository import reap_orphaned_runs
 
-        viewport={
-            "width": 1366,
-            "height": 768
-        }
-    )
+    await init_db()
 
-    page = context.new_page()
+    # Clear rows left at "running" by a previous crash. Age-limited so this
+    # never disturbs a scrape that a live API server is currently running.
+    async with session_scope() as session:
+        reaped = await reap_orphaned_runs(session, older_than_minutes=args.stale_after)
+    if reaped:
+        logger.warning("Cleared %s interrupted run(s)", reaped)
 
-# =========================================
-# NAUKRI SCRAPING
-# =========================================
+    sources = resolve_sources(args.sources)
+    try:
+        run_id = await start_run(sources, trigger="cli")
+    except ScrapeAlreadyRunning as exc:
+        print(
+            f"{exc}\n"
+            f"If that run is dead, clear it with: python main.py scrape --stale-after 0",
+            file=sys.stderr,
+        )
+        return 1
 
-    for NAUKRI_URL in NAUKRI_URLS:
+    # Mirror broker events to stdout so the CLI shows the same log the UI does.
+    queue, _ = broker.subscribe(run_id)
 
-        try:
+    async def drain() -> None:
+        while True:
+            event = await queue.get()
+            if event.get("type") == "log":
+                print(f"[{event.get('level', 'info').upper():5}] {event['message']}", flush=True)
+            elif event.get("type") == "progress":
+                print(f"  ... {event['percent']}% ({event['done']}/{event['total']})", flush=True)
+            elif event.get("type") == "done":
+                return
 
-            print(
-                f"\nOpening Naukri: "
-                f"{NAUKRI_URL}"
-            )
+    printer = asyncio.create_task(drain())
+    stats = await run_scrape(run_id=run_id, sources=sources, query_limit=args.limit)
+    await asyncio.wait_for(printer, timeout=5)
 
-            page.goto(
-                NAUKRI_URL,
-                timeout=60000
-            )
+    print("\n" + json.dumps(stats.as_dict(), indent=2))
+    return 0 if stats.jobs_kept or stats.jobs_updated else 1
 
-            time.sleep(8)
 
-            page.mouse.wheel(
-                0,
-                4000
-            )
+async def _export(args: argparse.Namespace) -> int:
+    from sqlalchemy import select
 
-            time.sleep(3)
+    from app.db import SessionLocal, init_db
+    from app.models import Job
 
-            naukri_html = page.content()
+    await init_db()
+    target = Path(args.path)
+    target.parent.mkdir(parents=True, exist_ok=True)
 
-            naukri_jobs = extract_job_cards(
-                naukri_html
-            )
+    written = 0
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(Job).where(Job.is_active.is_(True)))).scalars()
+        with target.open("w", encoding="utf-8") as handle:
+            for job in rows:
+                record = {
+                    "title": job.title,
+                    "company": job.company,
+                    "location": job.location,
+                    "experience": job.experience_text,
+                    "salary": job.salary_text,
+                    "apply_link": job.apply_link,
+                    "description": job.description,
+                    "skills": job.skills,
+                    "category": job.category,
+                    "seniority": job.seniority,
+                    "work_mode": job.work_mode,
+                    "source": job.source,
+                    "posted_at": job.posted_at.isoformat() if job.posted_at else None,
+                    "scraped_at": job.first_seen_at.isoformat(),
+                }
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                written += 1
 
-            print(
-                f"Naukri Jobs Found: "
-                f"{len(naukri_jobs)}"
-            )
+    print(f"Exported {written} jobs to {target}")
+    return 0
 
-            for job in naukri_jobs:
 
-                try:
+async def _import(args: argparse.Namespace) -> int:
+    """Backfill from the pre-2.0 output/jobs.jsonl file."""
+    from app.db import init_db, session_scope
+    from app.enrich import normalize_many
+    from app.sources.base import RawJob
+    from app.utils import parse_iso_date
 
-                    if not job["apply_link"]:
-                        continue
+    source_path = Path(args.path)
+    if not source_path.exists():
+        print(f"No such file: {source_path}", file=sys.stderr)
+        return 1
 
-                    if not is_tech_job(
-                        job["title"]
-                    ):
-                        continue
+    await init_db()
 
-                    if not is_fresher_job(
-                        job["title"],
-                        job["experience"]
-                    ):
-                        continue
-
-                    unique_key = (
-                        job["title"].lower().strip()
-                        +
-                        job["company"].lower().strip()
-                    )
-
-                    if unique_key in existing_jobs:
-
-                        continue
-
-                    print(
-                        f"Naukri Opening: "
-                        f"{job['title']}"
-                    )
-
-                    time.sleep(
-                        random.uniform(2, 5)
-                    )
-
-                    job_page = context.new_page()
-
-                    try:
-
-                        job_page.goto(
-                            job["apply_link"],
-                            timeout=60000
-                        )
-
-                        time.sleep(5)
-
-                        job_html = (
-                            job_page.content()
-                        )
-
-                        if is_dead_job(
-                            job_html
-                        ):
-
-                            continue
-
-                        description = (
-                            extract_job_description(
-                                job_html
-                            )
-                        )
-
-                        skills = (
-                            extract_skills(
-                                description
-                            )
-                        )
-
-                        category = (
-                            categorize_job(
-                                job["title"],
-                                description
-                            )
-                        )
-
-                        job["description"] = (
-                            description
-                        )
-
-                        job["skills"] = skills
-
-                        job["category"] = (
-                            category
-                        )
-
-                        job["source"] = (
-                            "naukri"
-                        )
-
-                        job["scraped_at"] = str(
-                            datetime.now()
-                        )
-
-                        jobs_data.append(
-                            job
-                        )
-
-                        existing_jobs.add(
-                            unique_key
-                        )
-
-                        with open(
-                            "output/jobs.jsonl",
-                            "a",
-                            encoding="utf-8"
-                        ) as f:
-
-                            f.write(json.dumps(job, ensure_ascii=False) + "\n")
-                        print(
-                            f"Saved Naukri: "
-                            f"{job['title']} | "
-                            f"{category}"
-                        )
-
-                    finally:
-
-                        job_page.close()
-
-                except Exception as e:
-
-                    print(
-                        f"Naukri Job Error: "
-                        f"{e}"
-                    )
-
-        except Exception as e:
-
-            print(
-                f"Naukri Search Error: "
-                f"{e}"
-            )
-
-    # =========================================
-    # LINKEDIN SCRAPING
-    # =========================================
-
-    for search_term in LINKEDIN_SEARCHES:
-
-        try:
-
-            linkedin_url = (
-                "https://www.linkedin.com/jobs/search/"
-                f"?keywords={search_term.replace(' ', '%20')}"
-                "&location=India"
-                "&geoId=102713980"
-                "&f_E=2"
-            )
-
-            print(
-                f"\nSearching LinkedIn: "
-                f"{search_term}"
-            )
-
-            page.goto(
-                linkedin_url,
-                timeout=60000
-            )
-
-            time.sleep(8)
-
-            for _ in range(5):
-
-                page.mouse.wheel(
-                    0,
-                    3000
-                )
-
-                time.sleep(2)
-
-            linkedin_html = page.content()
-
-            linkedin_jobs = (
-                extract_linkedin_jobs(
-                    linkedin_html
+    raws: list[RawJob] = []
+    skipped = 0
+    with source_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            raws.append(
+                RawJob(
+                    source=record.get("source", "legacy"),
+                    title=record.get("title", ""),
+                    company=record.get("company", ""),
+                    location=record.get("location", ""),
+                    experience_text=record.get("experience", ""),
+                    salary_text=record.get("salary", ""),
+                    apply_link=record.get("apply_link", ""),
+                    description=record.get("description", ""),
+                    posted_at=parse_iso_date(record.get("scraped_at")),
+                    declared_skills=record.get("skills") or [],
                 )
             )
 
-            print(
-                f"LinkedIn Jobs Found: "
-                f"{len(linkedin_jobs)}"
-            )
+    normalized, rejections = normalize_many(raws)
+    from app.repository import upsert_jobs
 
-            for job in linkedin_jobs:
-
-                try:
-
-                    if not job["apply_link"]:
-                        continue
-
-                    if not is_tech_job(
-                        job["title"]
-                    ):
-                        continue
-                    if (
-                        job["location"]
-                        and
-                        "india" not in job["location"].lower()
-                        ):
-                        continue
-
-                    if not is_fresher_job(
-                        job["title"],
-                        job["experience"]
-                    ):
-                        continue
-
-                    unique_key = (
-                        job["title"].lower().strip()
-                        +
-                        job["company"].lower().strip()
-                    )
-
-                    if unique_key in existing_jobs:
-
-                        continue
-
-                    print(
-                        f"LinkedIn Opening: "
-                        f"{job['title']}"
-                    )
-
-                    job_page = context.new_page()
-
-                    try:
-
-                        job_page.goto(
-                            job["apply_link"],
-                            timeout=60000
-                        )
-
-                        time.sleep(5)
-
-                        job_html = (
-                            job_page.content()
-                        )
-
-                        if is_dead_job(
-                            job_html
-                        ):
-
-                            continue
-
-                        description = (
-                            extract_linkedin_description(
-                                job_html
-                            )
-                        )
-
-                        skills = (
-                            extract_skills(
-                                description
-                            )
-                        )
-
-                        category = (
-                            categorize_job(
-                                job["title"],
-                                description
-                            )
-                        )
-
-                        job["description"] = (
-                            description
-                        )
-
-                        job["skills"] = skills
-
-                        job["category"] = (
-                            category
-                        )
-
-                        job["source"] = (
-                            "linkedin"
-                        )
-
-                        job["scraped_at"] = str(
-                            datetime.now()
-                        )
-
-                        jobs_data.append(
-                            job
-                        )
-
-                        existing_jobs.add(
-                            unique_key
-                        )
-                        with open(
-                            "output/jobs.jsonl",
-                            "a",
-                            encoding="utf-8"
-                        ) as f:
-
-                            f.write(json.dumps(job, ensure_ascii=False) + "\n")
-
-                        print(
-                            f"Saved LinkedIn: "
-                            f"{job['title']} | "
-                            f"{job['location']} | "
-                            f"{category}"
-                        )
-
-                    finally:
-
-                        job_page.close()
-
-                except Exception as e:
-
-                    print(
-                        f"LinkedIn Job Error: "
-                        f"{e}"
-                    )
-
-        except Exception as e:
-
-            print(
-                f"LinkedIn Search Error: "
-                f"{e}")
-
-
-    # Final summary handled dynamically as we append
+    async with session_scope() as session:
+        result = await upsert_jobs(session, normalized)
 
     print(
-        f"\nSuccessfully saved "
-        f"{len(jobs_data)} total jobs"
+        f"Read {len(raws)} records ({skipped} malformed), kept {len(normalized)}, "
+        f"inserted {result.created}, updated {result.updated}. Rejections: {rejections}"
     )
+    return 0
+
+
+async def _stats(_: argparse.Namespace) -> int:
+    from app.db import SessionLocal, init_db
+    from app.models import Job
+    from app.repository import count_jobs, group_counts, latest_run
+
+    await init_db()
+    async with SessionLocal() as session:
+        total = await count_jobs(session, active_only=False)
+        active = await count_jobs(session, active_only=True)
+        by_category = await group_counts(session, Job.category)
+        by_source = await group_counts(session, Job.source)
+        run = await latest_run(session)
+
+    print(f"Jobs: {active} active / {total} total")
+    print("\nBy source:")
+    for row in by_source:
+        print(f"  {row['value']:<12} {row['count']}")
+    print("\nBy category:")
+    for row in by_category:
+        print(f"  {row['value']:<32} {row['count']}")
+    if run:
+        print(
+            f"\nLast run #{run.id}: {run.status}, {run.jobs_new} new, "
+            f"{run.jobs_updated} updated, {run.duration_seconds}s"
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="job_scraper", description="Tech job extraction tool"
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    serve = sub.add_parser("serve", help="Run the API server")
+    serve.add_argument("--host", default=None)
+    serve.add_argument("--port", type=int, default=None)
+    serve.add_argument("--reload", action="store_true")
+    serve.set_defaults(func=cmd_serve, is_async=False)
+
+    scrape = sub.add_parser("scrape", help="Run one scrape into the database")
+    scrape.add_argument(
+        "--sources", nargs="*", default=None, help="e.g. --sources naukri linkedin"
+    )
+    scrape.add_argument("--limit", type=int, default=None, help="Cap number of search queries")
+    scrape.add_argument(
+        "--stale-after",
+        type=int,
+        default=120,
+        metavar="MINUTES",
+        help="Clear interrupted runs older than this before starting (0 clears all)",
+    )
+    scrape.set_defaults(func=_scrape, is_async=True)
+
+    export = sub.add_parser("export", help="Dump active jobs to JSONL")
+    export.add_argument("path", nargs="?", default="output/jobs.jsonl")
+    export.set_defaults(func=_export, is_async=True)
+
+    importer = sub.add_parser("import", help="Backfill from a legacy JSONL file")
+    importer.add_argument("path", nargs="?", default="output/jobs.jsonl")
+    importer.set_defaults(func=_import, is_async=True)
+
+    stats = sub.add_parser("stats", help="Show database counts")
+    stats.set_defaults(func=_stats, is_async=True)
+
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.is_async:
+        return asyncio.run(args.func(args))
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

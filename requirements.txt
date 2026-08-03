@@ -1,7 +1,23 @@
-playwright
-beautifulsoup4
-lxml
-python-dotenv
-fastapi
-uvicorn
-sse-starlette
+# --- API ---------------------------------------------------------------
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+
+# --- storage -----------------------------------------------------------
+SQLAlchemy>=2.0.36,<3.0
+aiosqlite>=0.20
+# Uncomment to run against Postgres instead of SQLite:
+# asyncpg>=0.30
+
+# --- scraping ----------------------------------------------------------
+httpx[http2]>=0.27,<1.0
+beautifulsoup4>=4.12
+lxml>=5.3
+
+# --- scheduling --------------------------------------------------------
+APScheduler>=3.10,<4.0
+
+# --- optional browser fallback -----------------------------------------
+# Only needed if PLAYWRIGHT_FALLBACK=true. Skip it for a slim image.
+playwright>=1.49

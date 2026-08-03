@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Job API — Test Console</title>
+<style>
+  :root {
+    --bg:#0b1120; --panel:#131c31; --border:#243049; --text:#e8eefc;
+    --muted:#93a2bd; --accent:#3b82f6; --ok:#10b981; --err:#ef4444; --warn:#f59e0b;
+    color-scheme: dark;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    font:14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    background:var(--bg); color:var(--text); padding:16px;
+  }
+  h1 { font-size:17px; display:flex; align-items:center; gap:10px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px; }
+  a { color:var(--accent); }
+  button, input, select {
+    font:inherit; color:inherit; background:#0f1729;
+    border:1px solid var(--border); border-radius:7px; padding:7px 9px;
+  }
+  button { background:var(--accent); border-color:transparent; font-weight:600; cursor:pointer; }
+  button:hover:not(:disabled) { background:#2563eb; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.ghost { background:transparent; border-color:var(--border); color:var(--muted); font-weight:500; }
+  button.ghost:hover:not(:disabled) { color:var(--text); border-color:var(--accent); }
+  button.danger { background:var(--err); }
+  button.danger:hover:not(:disabled) { background:#dc2626; }
+  .log .l-warning { color:#fcd34d; }
+
+  .bar {
+    display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:12px 16px; margin-bottom:16px;
+  }
+  .pills { display:flex; gap:8px; flex-wrap:wrap; }
+  .pill {
+    background:#0f1729; border:1px solid var(--border); border-radius:999px;
+    padding:4px 11px; font-size:12px; color:var(--muted);
+  }
+  .pill b { color:var(--text); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); margin-right:5px; }
+  .dot.ok { background:var(--ok); } .dot.err { background:var(--err); }
+
+  .tabs { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { background:transparent; border:1px solid var(--border); color:var(--muted); font-weight:500; }
+  .tab.on { background:var(--accent); border-color:transparent; color:#fff; font-weight:600; }
+  .view { display:none; } .view.on { display:block; }
+
+  .layout { display:grid; grid-template-columns:250px 1fr; gap:16px; align-items:start; }
+  @media (max-width:860px) { .layout { grid-template-columns:1fr; } }
+
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px; }
+  .filters { display:flex; flex-direction:column; gap:11px; position:sticky; top:16px; }
+  .filters label { display:flex; flex-direction:column; gap:4px; font-size:11px;
+    text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; }
+  .filters input, .filters select { width:100%; }
+
+  .results-head { display:flex; justify-content:space-between; align-items:center;
+    gap:10px; margin-bottom:10px; color:var(--muted); font-size:13px; flex-wrap:wrap; }
+  .job { background:var(--panel); border:1px solid var(--border); border-radius:11px;
+    padding:13px 15px; margin-bottom:10px; }
+  .job:hover { border-color:#38507e; }
+  .job-top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+  .job-title { font-size:15px; font-weight:650; }
+  .job-sub { color:var(--muted); font-size:13px; margin:3px 0 8px; }
+  .tags { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:9px; }
+  .tag { font-size:11px; padding:2px 8px; border-radius:999px;
+    background:rgba(59,130,246,.13); border:1px solid rgba(59,130,246,.28); color:#9cc4ff; }
+  .tag.src { background:rgba(16,185,129,.13); border-color:rgba(16,185,129,.3);
+    color:#6ee7b7; text-transform:uppercase; letter-spacing:.04em; }
+  .tag.sk { background:rgba(255,255,255,.05); border-color:var(--border); color:var(--muted); }
+  .job-actions { display:flex; gap:14px; align-items:center; font-size:13px; }
+  .desc { margin-top:10px; padding-top:10px; border-top:1px solid var(--border);
+    color:var(--muted); font-size:13px; white-space:pre-wrap; max-height:260px; overflow:auto; }
+
+  .pager { display:flex; justify-content:center; align-items:center; gap:14px;
+    color:var(--muted); font-size:13px; padding:8px 0 20px; }
+  .empty { text-align:center; color:var(--muted); padding:44px 12px;
+    border:1px dashed var(--border); border-radius:12px; }
+
+  .track { flex:1; min-width:120px; height:6px; background:#0f1729; border-radius:999px; overflow:hidden; }
+  .fill { height:100%; width:0%; background:linear-gradient(90deg,var(--accent),#8b5cf6); transition:width .3s; }
+  pre.log, pre.json {
+    background:#080d18; border:1px solid var(--border); border-radius:9px; padding:11px;
+    font:12px/1.6 ui-monospace, "Fira Code", Consolas, monospace;
+    max-height:340px; overflow:auto; white-space:pre-wrap; word-break:break-word;
+  }
+  .log .l-error { color:#fca5a5; } .log .l-info { color:#a7f3d0; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .row input.grow { flex:1; min-width:220px; }
+  .note { color:var(--muted); font-size:12px; margin-top:8px; }
+  .banner { padding:9px 12px; border-radius:9px; margin-bottom:12px; font-size:13px; display:none; }
+  .banner.err { display:block; background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.35); color:#fca5a5; }
+  .banner.ok  { display:block; background:rgba(16,185,129,.12); border:1px solid rgba(16,185,129,.35); color:#6ee7b7; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <h1>⚙️ Job API — Test Console</h1>
+  <div class="pills" id="statusPills"><span class="pill"><span class="dot"></span>connecting…</span></div>
+  <div class="row" style="margin:0">
+    <input id="adminToken" type="password" placeholder="X-Admin-Token (if set)" style="width:210px" />
+    <button id="btnScrape">▶ Run scrape</button>
+    <button id="btnStop" class="danger" disabled>■ Stop</button>
+    <button class="ghost" id="btnRefresh">↻ Reload</button>
+  </div>
+</div>
+
+<div id="banner" class="banner"></div>
+
+<div class="tabs">
+  <button class="tab on" data-view="browse">Browse jobs</button>
+  <button class="tab" data-view="runs">Scrape runs</button>
+  <button class="tab" data-view="raw">Raw endpoint</button>
+</div>
+
+<!-- ------------------------------------------------------------- browse -->
+<section class="view on" id="view-browse">
+  <div class="layout">
+    <aside class="card filters">
+      <label>Search
+        <input id="f-q" type="search" placeholder="title, company, skill…" />
+      </label>
+      <label>Category <select id="f-category"><option value="">All</option></select></label>
+      <label>Source <select id="f-source"><option value="">All</option></select></label>
+      <label>Seniority <select id="f-seniority"><option value="">Any</option></select></label>
+      <label>Work mode <select id="f-work_mode"><option value="">Any</option></select></label>
+      <label>Skill <select id="f-skill"><option value="">Any</option></select></label>
+      <label>Max experience
+        <select id="f-max_experience">
+          <option value="">Any</option>
+          <option value="0">0 yrs (fresher)</option>
+          <option value="1">≤ 1 yr</option>
+          <option value="2">≤ 2 yrs</option>
+          <option value="3">≤ 3 yrs</option>
+        </select>
+      </label>
+      <label>Posted within
+        <select id="f-posted_within_days">
+          <option value="">Any time</option>
+          <option value="1">24 hours</option>
+          <option value="7">7 days</option>
+          <option value="30">30 days</option>
+        </select>
+      </label>
+      <label>Sort
+        <select id="f-sort">
+          <option value="posted_at">Newest posted</option>
+          <option value="first_seen_at">Recently found</option>
+          <option value="experience">Least experience</option>
+          <option value="company">Company A–Z</option>
+        </select>
+      </label>
+      <button class="ghost" id="btnClear">Clear filters</button>
+    </aside>
+
+    <main>
+      <div class="results-head">
+        <span id="resultCount">Loading…</span>
+        <span id="requestUrl" style="font:11px ui-monospace,monospace; color:#5f708f"></span>
+      </div>
+      <div id="jobList"></div>
+      <div class="pager" id="pager"></div>
+    </main>
+  </div>
+</section>
+
+<!-- --------------------------------------------------------------- runs -->
+<section class="view" id="view-runs">
+  <div class="card" style="margin-bottom:14px">
+    <h2>Live run</h2>
+    <div class="row">
+      <strong id="runLabel">No active run</strong>
+      <div class="track"><div class="fill" id="runFill"></div></div>
+      <span id="runPct" style="color:var(--muted); min-width:46px; text-align:right">0%</span>
+    </div>
+    <pre class="log" id="runLog">Start a scrape to stream its log here.</pre>
+  </div>
+  <div class="card">
+    <h2>Recent runs</h2>
+    <pre class="json" id="runsJson">…</pre>
+  </div>
+</section>
+
+<!-- ---------------------------------------------------------------- raw -->
+<section class="view" id="view-raw">
+  <div class="card">
+    <h2>Call any endpoint</h2>
+    <div class="row">
+      <select id="rawMethod" style="width:100px"><option>GET</option><option>POST</option><option>DELETE</option></select>
+      <input class="grow" id="rawPath" value="/jobs?page_size=3" />
+      <button id="btnRaw">Send</button>
+    </div>
+    <div class="row">
+      <button class="ghost" data-path="/health">/health</button>
+      <button class="ghost" data-path="/meta">/meta</button>
+      <button class="ghost" data-path="/stats">/stats</button>
+      <button class="ghost" data-path="/filters">/filters</button>
+      <button class="ghost" data-path="/scrape/runs">/scrape/runs</button>
+      <button class="ghost" data-path="/jobs?category=Backend&skill=Python&page_size=5">filtered /jobs</button>
+    </div>
+    <pre class="json" id="rawOut">Response appears here.</pre>
+    <p class="note">POST bodies are sent as <code>{}</code>. The admin token above is attached automatically.</p>
+  </div>
+</section>
+
+<script>
+const $  = (id) => document.getElementById(id);
+const el = (tag, cls, txt) => { const n = document.createElement(tag); if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+
+// Same-origin: the API serves this page, so no CORS setup is needed.
+const API = window.location.origin;
+
+let page = 1, meta = null, activeRun = null, evtSource = null;
+
+const token = () => $('adminToken').value.trim();
+$('adminToken').value = localStorage.getItem('adminToken') || '';
+$('adminToken').addEventListener('change', () => localStorage.setItem('adminToken', token()));
+
+function banner(msg, kind = 'err') {
+  const b = $('banner');
+  if (!msg) { b.className = 'banner'; b.textContent = ''; return; }
+  b.className = 'banner ' + kind;
+  b.textContent = msg;
+}
+
+async function call(path, { method = 'GET', body } = {}) {
+  const headers = {};
+  if (token()) headers['X-Admin-Token'] = token();
+  if (body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  let data; try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) { const e = new Error(data?.detail || res.statusText); e.status = res.status; e.data = data; throw e; }
+  return data;
+}
+
+/* ------------------------------------------------------------- filters */
+const FILTER_IDS = ['q','category','source','seniority','work_mode','skill','max_experience','posted_within_days','sort'];
+
+function queryString() {
+  const p = new URLSearchParams();
+  for (const id of FILTER_IDS) {
+    const v = $('f-' + id).value.trim();
+    if (v) p.append(id, v);
+  }
+  p.append('page', page);
+  p.append('page_size', 20);
+  return p.toString();
+}
+
+function fillSelect(id, values, keepAll) {
+  const sel = $(id), current = sel.value;
+  sel.innerHTML = '';
+  sel.appendChild(new Option(keepAll, ''));
+  for (const item of values || []) {
+    sel.appendChild(new Option(`${item.value} (${item.count})`, item.value));
+  }
+  sel.value = current;
+}
+
+/* --------------------------------------------------------------- jobs */
+function renderJob(job) {
+  const card = el('div', 'job');
+
+  const top = el('div', 'job-top');
+  top.appendChild(el('div', 'job-title', job.title));
+  const when = job.posted_at || job.first_seen_at;
+  top.appendChild(el('span', '', when ? new Date(when).toLocaleDateString() : ''));
+  card.appendChild(top);
+
+  card.appendChild(el('div', 'job-sub', `${job.company}${job.location ? ' · ' + job.location : ''}`));
+
+  const tags = el('div', 'tags');
+  tags.appendChild(el('span', 'tag src', job.source));
+  tags.appendChild(el('span', 'tag', job.category));
+  tags.appendChild(el('span', 'tag', job.seniority));
+  if (job.work_mode !== 'onsite') tags.appendChild(el('span', 'tag', job.work_mode));
+  if (job.experience_text) tags.appendChild(el('span', 'tag', job.experience_text));
+  if (job.salary_text) tags.appendChild(el('span', 'tag', job.salary_text));
+  for (const s of (job.skills || []).slice(0, 10)) tags.appendChild(el('span', 'tag sk', s));
+  card.appendChild(tags);
+
+  const actions = el('div', 'job-actions');
+  const link = el('a', '', 'Open posting ↗');
+  link.href = job.apply_link; link.target = '_blank'; link.rel = 'noopener noreferrer';
+  actions.appendChild(link);
+
+  const toggle = el('button', 'ghost', 'Show description');
+  let body = null;
+  toggle.onclick = async () => {
+    if (body) { body.remove(); body = null; toggle.textContent = 'Show description'; return; }
+    toggle.disabled = true;
+    try {
+      const full = await call(`/jobs/${job.id}`);
+      body = el('div', 'desc', full.description || '(no description stored — open the posting)');
+      card.appendChild(body);
+      toggle.textContent = 'Hide description';
+    } catch (e) { banner(`GET /jobs/${job.id} failed: ${e.message}`); }
+    finally { toggle.disabled = false; }
+  };
+  actions.appendChild(toggle);
+  actions.appendChild(el('span', '', `id ${job.id}`));
+  card.appendChild(actions);
+
+  return card;
+}
+
+async function loadJobs() {
+  const qs = queryString();
+  $('requestUrl').textContent = 'GET /jobs?' + qs;
+  try {
+    const data = await call('/jobs?' + qs);
+    meta = data.meta;
+    $('resultCount').textContent = `${meta.total} job${meta.total === 1 ? '' : 's'} · page ${meta.page}/${meta.total_pages || 1}`;
+
+    const list = $('jobList');
+    list.innerHTML = '';
+    if (!data.items.length) {
+      const empty = el('div', 'empty');
+      empty.appendChild(el('p', '', 'No jobs match these filters.'));
+      empty.appendChild(el('p', '', 'If the database is empty, click "Run scrape" above.'));
+      list.appendChild(empty);
+    } else {
+      for (const job of data.items) list.appendChild(renderJob(job));
+    }
+    renderPager();
+    banner('');
+  } catch (e) {
+    banner(`GET /jobs failed: ${e.message}`);
+  }
+}
+
+function renderPager() {
+  const p = $('pager');
+  p.innerHTML = '';
+  if (!meta || meta.total_pages <= 1) return;
+  const prev = el('button', 'ghost', '← Prev');
+  prev.disabled = !meta.has_prev;
+  prev.onclick = () => { page--; loadJobs(); window.scrollTo(0, 0); };
+  const next = el('button', 'ghost', 'Next →');
+  next.disabled = !meta.has_next;
+  next.onclick = () => { page++; loadJobs(); window.scrollTo(0, 0); };
+  p.append(prev, el('span', '', `${meta.page} / ${meta.total_pages}`), next);
+}
+
+/* -------------------------------------------------------- status/facets */
+async function loadStatus() {
+  const pills = $('statusPills');
+  pills.innerHTML = '';
+  const add = (html) => { const s = el('span', 'pill'); s.innerHTML = html; pills.appendChild(s); };
+  try {
+    const [health, stats] = await Promise.all([call('/health'), call('/stats')]);
+    add(`<span class="dot ok"></span>API ${health.version}`);
+    add(`db <b>${health.database ? 'ok' : 'down'}</b>`);
+    add(`scheduler <b>${health.scheduler ? 'on' : 'off'}</b>`);
+    add(`active <b>${stats.active_jobs}</b>`);
+    add(`today <b>${stats.jobs_added_today}</b>`);
+    if (stats.last_run) add(`last run <b>#${stats.last_run.id} ${stats.last_run.status}</b>`);
+  } catch (e) {
+    add(`<span class="dot err"></span>API unreachable`);
+    banner(`Cannot reach the API at ${API}. Start it with: python main.py serve`);
+  }
+}
+
+async function loadFacets() {
+  try {
+    const f = await call('/filters');
+    fillSelect('f-category', f.categories, 'All');
+    fillSelect('f-source', f.sources, 'All');
+    fillSelect('f-seniority', f.seniorities, 'Any');
+    fillSelect('f-work_mode', f.work_modes, 'Any');
+    fillSelect('f-skill', f.skills, 'Any');
+  } catch { /* status pill already reports connectivity */ }
+}
+
+async function loadRuns() {
+  try { $('runsJson').textContent = JSON.stringify(await call('/scrape/runs?limit=5'), null, 2); }
+  catch (e) { $('runsJson').textContent = 'Failed: ' + e.message; }
+}
+
+/* -------------------------------------------------------------- scrape */
+function setRunning(runId) {
+  activeRun = runId;
+  $('btnScrape').disabled = !!runId;
+  $('btnStop').disabled = !runId;
+  $('btnStop').textContent = '■ Stop';
+}
+
+function streamRun(runId) {
+  setRunning(runId);
+  $('runLabel').textContent = `Run #${runId} — running`;
+  $('runLog').textContent = '';
+  $('runFill').style.width = '0%';
+  $('runPct').textContent = '0%';
+
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource(`${API}/scrape/runs/${runId}/stream`);
+
+  evtSource.onmessage = (event) => {
+    const d = JSON.parse(event.data);
+    if (d.type === 'progress') {
+      $('runFill').style.width = d.percent + '%';
+      $('runPct').textContent = d.percent + '%';
+    } else if (d.type === 'log') {
+      const line = el('div', 'l-' + (d.level || 'info'), d.message);
+      $('runLog').appendChild(line);
+      $('runLog').scrollTop = $('runLog').scrollHeight;
+    } else if (d.type === 'done') {
+      evtSource.close();
+      setRunning(null);
+      $('runLabel').textContent = `Run #${runId} — ${d.status}`;
+      const kept = d.stats?.jobs_new ?? 0;
+      banner(
+        d.status === 'cancelled'
+          ? `Run #${runId} stopped. ${kept} new job(s) saved from partial results.`
+          : `Run #${runId} ${d.status}.`,
+        d.status === 'failed' ? 'err' : 'ok',
+      );
+      loadStatus(); loadFacets(); loadJobs(); loadRuns();
+    }
+  };
+
+  evtSource.onerror = () => {
+    evtSource.close();
+    setRunning(null);
+    $('runLabel').textContent = `Run #${runId} — stream disconnected`;
+  };
+}
+
+$('btnStop').onclick = async () => {
+  if (!activeRun) return;
+  const runId = activeRun;
+  $('btnStop').disabled = true;
+  $('btnStop').textContent = 'Stopping…';
+  try {
+    const res = await call(`/scrape/runs/${runId}/cancel`, { method: 'POST', body: {} });
+    banner(res.message, 'ok');
+    // The run keeps streaming until it reaches a clean boundary; the 'done'
+    // event re-enables the buttons.
+  } catch (e) {
+    $('btnStop').disabled = false;
+    $('btnStop').textContent = '■ Stop';
+    if (e.status === 401) banner('401 — stopping a run requires the admin token.');
+    else if (e.status === 409) { banner(`Run #${runId} already finished.`, 'ok'); setRunning(null); }
+    else banner('Cancel failed: ' + e.message);
+  }
+};
+
+$('btnScrape').onclick = async () => {
+  banner('');
+  $('btnScrape').disabled = true;
+  try {
+    const res = await call('/scrape/run', { method: 'POST', body: {} });
+    document.querySelector('.tab[data-view="runs"]').click();
+    streamRun(res.run_id);
+  } catch (e) {
+    setRunning(null);
+    if (e.status === 401) banner('401 — this API requires an admin token. Paste it in the box above.');
+    else if (e.status === 409) banner('409 — a scrape is already running.');
+    else banner('POST /scrape/run failed: ' + e.message);
+  }
+};
+
+/* ----------------------------------------------------------------- raw */
+$('btnRaw').onclick = async () => {
+  const method = $('rawMethod').value;
+  const path = $('rawPath').value.trim() || '/health';
+  $('rawOut').textContent = `${method} ${path}\n…`;
+  try {
+    const data = await call(path, { method, body: method === 'POST' ? {} : undefined });
+    $('rawOut').textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    $('rawOut').textContent = `HTTP ${e.status || '?'}\n` + JSON.stringify(e.data ?? e.message, null, 2);
+  }
+};
+for (const b of document.querySelectorAll('button[data-path]')) {
+  b.onclick = () => { $('rawPath').value = b.dataset.path; $('rawMethod').value = 'GET'; $('btnRaw').click(); };
+}
+
+/* ----------------------------------------------------------------- wire */
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t === tab));
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('on', v.id === 'view-' + tab.dataset.view));
+    if (tab.dataset.view === 'runs') loadRuns();
+  };
+}
+
+let debounce;
+$('f-q').addEventListener('input', () => {
+  clearTimeout(debounce);
+  debounce = setTimeout(() => { page = 1; loadJobs(); }, 350);
+});
+for (const id of FILTER_IDS.filter((i) => i !== 'q')) {
+  $('f-' + id).addEventListener('change', () => { page = 1; loadJobs(); });
+}
+$('btnClear').onclick = () => {
+  for (const id of FILTER_IDS) $('f-' + id).value = '';
+  $('f-sort').value = 'posted_at';
+  page = 1; loadJobs();
+};
+$('btnRefresh').onclick = () => { loadStatus(); loadFacets(); loadJobs(); };
+
+// Reattach to a scrape that is already running (e.g. after a page reload).
+(async () => {
+  await loadStatus();
+  await loadFacets();
+  await loadJobs();
+  try {
+    const running = (await call('/scrape/runs?limit=3')).find((r) => r.status === 'running');
+    if (running) streamRun(running.id);
+  } catch { /* nothing to reattach to */ }
+})();
+</script>
+</body>
+</html>
