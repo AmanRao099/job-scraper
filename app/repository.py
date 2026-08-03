@@ -43,6 +43,11 @@ class JobFilters:
     company: str | None = None
     min_experience: int | None = None
     max_experience: int | None = None
+    # Whether postings with no stated experience satisfy an experience filter.
+    # True keeps recall (plenty of genuine fresher ads never state a number);
+    # False is the strict reading, for a listing that must not show a senior
+    # role. Only consulted when an experience bound is actually set.
+    include_unknown_experience: bool = True
     posted_within_days: int | None = None
     active_only: bool = True
 
@@ -192,12 +197,18 @@ def _apply_filters(stmt, filters: JobFilters):
         stmt = stmt.where(func.lower(Job.company).like(needle, escape="\\"))
 
     if filters.min_experience is not None:
+        bound = Job.experience_max >= filters.min_experience
         stmt = stmt.where(
-            or_(Job.experience_max.is_(None), Job.experience_max >= filters.min_experience)
+            or_(Job.experience_max.is_(None), bound)
+            if filters.include_unknown_experience
+            else bound
         )
     if filters.max_experience is not None:
+        bound = Job.experience_min <= filters.max_experience
         stmt = stmt.where(
-            or_(Job.experience_min.is_(None), Job.experience_min <= filters.max_experience)
+            or_(Job.experience_min.is_(None), bound)
+            if filters.include_unknown_experience
+            else bound
         )
 
     if filters.posted_within_days:

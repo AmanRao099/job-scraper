@@ -205,6 +205,13 @@ async def list_jobs(
     company: str | None = Query(None),
     min_experience: int | None = Query(None, ge=0, le=30),
     max_experience: int | None = Query(None, ge=0, le=30),
+    include_unknown_experience: bool = Query(
+        True,
+        description=(
+            "Whether postings that never state their experience requirement "
+            "satisfy min/max_experience. Set false for a strict fresher listing."
+        ),
+    ),
     posted_within_days: int | None = Query(None, ge=1, le=365),
     include_inactive: bool = Query(False),
     sort: str = Query("posted_at", pattern="^(posted_at|first_seen_at|last_seen_at|title|company|experience)$"),
@@ -225,6 +232,7 @@ async def list_jobs(
         company=company,
         min_experience=min_experience,
         max_experience=max_experience,
+        include_unknown_experience=include_unknown_experience,
         posted_within_days=posted_within_days,
         active_only=not include_inactive,
     )

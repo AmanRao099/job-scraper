@@ -150,6 +150,49 @@ class TestSearch:
         _, total = await repo.search_jobs(session, repo.JobFilters(q="%"))
         assert total == 0
 
+    async def test_unknown_experience_can_be_excluded(self, session):
+        """A posting with no stated experience satisfies every bound by default.
+
+        That is right for recall - plenty of genuine fresher ads never state a
+        number - but wrong for a listing that must not show senior roles, so it
+        has to be switchable rather than implicit.
+        """
+        async with SessionLocal() as s:
+            job = Job(
+                fingerprint="unknown-exp",
+                source="linkedin",
+                apply_link="https://example.com/1",
+                title="Software Engineer",
+                company="Unknown Co",
+                location="Remote",
+                description="",
+                experience_text="Not Applicable",
+                experience_min=None,
+                experience_max=None,
+                salary_text="",
+                skills=["Python"],
+                first_seen_at=utcnow(),
+                last_seen_at=utcnow(),
+            )
+            job.search_blob = job.build_search_blob()
+            s.add(job)
+            await s.commit()
+
+        async with SessionLocal() as s:
+            _, lenient = await repo.search_jobs(
+                s, repo.JobFilters(max_experience=0, include_unknown_experience=True)
+            )
+            _, strict = await repo.search_jobs(
+                s, repo.JobFilters(max_experience=0, include_unknown_experience=False)
+            )
+
+        assert lenient > strict
+        async with SessionLocal() as s:
+            rows, _ = await repo.search_jobs(
+                s, repo.JobFilters(max_experience=0, include_unknown_experience=False)
+            )
+            assert all(r.experience_min is not None for r in rows)
+
     async def test_company_filter_is_case_insensitive(self, session):
         _, total = await repo.search_jobs(session, repo.JobFilters(company="acme"))
         assert total == 2

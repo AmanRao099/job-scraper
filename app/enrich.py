@@ -20,7 +20,7 @@ from app.taxonomy import (
     extract_skills,
     has_strong_tech_title,
     is_tech_job,
-    parse_experience,
+    resolve_experience,
     secondary_categories,
 )
 from app.utils import clean_text, parse_salary, utcnow
@@ -152,7 +152,7 @@ def normalize(raw: RawJob) -> tuple[NormalizedJob | None, str | None]:
         return None, REJECT_EMPTY
 
     experience_text = clean_text(raw.experience_text, 120)
-    exp_min, exp_max = parse_experience(experience_text or title)
+    exp_min, exp_max = resolve_experience(experience_text, title, description)
 
     if exp_min is not None and exp_min > settings.max_experience_years:
         return None, REJECT_EXPERIENCE

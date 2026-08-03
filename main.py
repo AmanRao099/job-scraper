@@ -199,33 +199,52 @@ async def _reindex(args: argparse.Namespace) -> int:
 
     from app.db import init_db, session_scope
     from app.models import Job
+    from app.config import settings
     from app.taxonomy import (
         categorize,
         detect_seniority,
         detect_work_mode,
         is_tech_job,
+        resolve_experience,
         secondary_categories,
     )
 
     await init_db()
 
-    scanned = reblobbed = recategorised = retired = 0
+    scanned = reblobbed = recategorised = retired = re_experienced = 0
     async with session_scope() as session:
         rows = (await session.execute(select(Job))).scalars().all()
         for job in rows:
             scanned += 1
             skills = list(job.skills or [])
 
-            # A row that no longer passes the tech filter was admitted by a rule
-            # that has since been corrected. Deactivate rather than delete: the
-            # purge job removes it later, and the row stays inspectable.
-            if job.is_active and not is_tech_job(job.title, job.description, skills):
+            # Re-derive experience before anything else - it decides whether the
+            # posting belongs here at all. Rows collected before the description
+            # was consulted carry no experience, and a row with no experience
+            # satisfies every max_experience filter, so a ten-year role sits in
+            # a fresher search until this runs.
+            exp_min, exp_max = resolve_experience(
+                job.experience_text, job.title, job.description
+            )
+            if (exp_min, exp_max) != (job.experience_min, job.experience_max):
+                job.experience_min, job.experience_max = exp_min, exp_max
+                re_experienced += 1
+
+            too_senior = exp_min is not None and exp_min > settings.max_experience_years
+
+            # A row that no longer passes the tech filter, or that turns out to
+            # demand more experience than this tool targets, was admitted by a
+            # rule that has since been corrected. Deactivate rather than delete:
+            # the purge job removes it later, and the row stays inspectable.
+            if job.is_active and (
+                too_senior or not is_tech_job(job.title, job.description, skills)
+            ):
                 job.is_active = False
                 retired += 1
 
             category = categorize(job.title, job.description, skills)
             categories = secondary_categories(job.title, job.description, skills)
-            seniority = detect_seniority(job.title, job.experience_text, job.experience_min)
+            seniority = detect_seniority(job.title, job.experience_text, exp_min)
             work_mode = detect_work_mode(job.location, job.title, job.description)
 
             if (category, seniority, work_mode) != (job.category, job.seniority, job.work_mode):
@@ -245,7 +264,8 @@ async def _reindex(args: argparse.Namespace) -> int:
 
     print(
         f"Reindexed {scanned} jobs: {reblobbed} search blobs rebuilt, "
-        f"{recategorised} reclassified, {retired} retired as non-tech."
+        f"{recategorised} reclassified, {re_experienced} experience re-resolved, "
+        f"{retired} retired as non-tech or too senior."
     )
     return 0
 

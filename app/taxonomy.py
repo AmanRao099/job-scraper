@@ -588,6 +588,126 @@ def parse_experience(text: str) -> tuple[int | None, int | None]:
     return (None, None)
 
 
+# Job boards publish a seniority label instead of a number. LinkedIn always
+# sends one of these, and "Not Applicable" is its default when the poster left
+# the field alone - it means unknown, not fresher.
+# "Internship" and "Entry level" are absent on purpose: parse_experience already
+# recognises them and runs first.
+BOARD_SENIORITY_YEARS: dict[str, tuple[int, int | None]] = {
+    "associate": (1, 3),
+    "mid-senior level": (5, None),
+    "mid senior level": (5, None),
+    "director": (10, None),
+    "executive": (10, None),
+}
+
+_YEARS = r"(?:years?|yrs?|year\(s\)|yr\(s\))"
+
+# Ranges and minimums stated in prose. Unlike the experience-field parser these
+# all require an explicit unit: a description is full of bare numbers (salary
+# bands, dates, version numbers, team sizes) and "2-5" on its own means nothing.
+_PROSE_RANGE_RE = re.compile(
+    rf"(\d{{1,2}})\s*(?:-|–|—|to)\s*(\d{{1,2}})\s*\+?\s*{_YEARS}", re.IGNORECASE
+)
+_PROSE_MIN_RE = re.compile(
+    rf"(?:minimum|min\.?|at\s*least|atleast|over|more\s+than)?\s*"
+    rf"(\d{{1,2}})\s*\+\s*{_YEARS}",
+    re.IGNORECASE,
+)
+_PROSE_SINGLE_RE = re.compile(
+    rf"(\d{{1,2}})\s*{_YEARS}\s+(?:of\s+)?"
+    r"(?:relevant\s+|professional\s+|total\s+|overall\s+|hands[-\s]?on\s+|work\s+)?"
+    r"experience",
+    re.IGNORECASE,
+)
+_PROSE_FRESHER_RE = _compile([
+    "fresher", "freshers", "no prior experience", "no experience required",
+    "without any experience", "0 years of experience",
+])
+# "4 years" next to any of these is an education requirement, not experience.
+_EDUCATION_NEARBY_RE = re.compile(
+    r"\b(?:degree|bachelor|master|b\.?tech|m\.?tech|b\.?e\b|graduation|"
+    r"diploma|course|curriculum|programme|program\b|college|university)",
+    re.IGNORECASE,
+)
+
+
+def _is_education_context(text: str, start: int, end: int) -> bool:
+    """True when a "N years" match is describing a qualification."""
+    window = text[max(0, start - 60):end + 40]
+    return bool(_EDUCATION_NEARBY_RE.search(window))
+
+
+def parse_experience_in_prose(description: str) -> tuple[int | None, int | None]:
+    """Recover a requirement stated in the body text.
+
+    Boards frequently leave the structured experience field empty or set to a
+    placeholder while the description says "Minimum 10+ years of experience".
+    Without this, such a posting carries no experience at all and therefore
+    satisfies every max_experience filter - a senior role surfacing in a
+    fresher search, which is the worst failure this tool can produce.
+
+    When several requirements are stated, the least demanding one wins: a
+    posting listing "2+ years with APIs" alongside "8+ years overall" is still
+    reachable at two years, and erring toward recall keeps genuine junior roles
+    from being discarded.
+    """
+    if not description:
+        return (None, None)
+
+    text = description[:6000]
+    candidates: list[tuple[int, int | None]] = []
+
+    for match in _PROSE_RANGE_RE.finditer(text):
+        if _is_education_context(text, match.start(), match.end()):
+            continue
+        low, high = int(match.group(1)), int(match.group(2))
+        candidates.append((min(low, high), max(low, high)))
+
+    for pattern in (_PROSE_MIN_RE, _PROSE_SINGLE_RE):
+        for match in pattern.finditer(text):
+            if _is_education_context(text, match.start(), match.end()):
+                continue
+            years = int(match.group(1))
+            candidates.append((years, None))
+
+    if candidates:
+        return min(candidates, key=lambda pair: pair[0])
+
+    if _PROSE_FRESHER_RE.search(text):
+        return (0, 1)
+
+    return (None, None)
+
+
+def board_seniority_years(label: str) -> tuple[int, int | None] | None:
+    """Map a board's seniority label to a year range, if it carries one."""
+    return BOARD_SENIORITY_YEARS.get((label or "").strip().lower())
+
+
+def resolve_experience(
+    experience_text: str = "", title: str = "", description: str = ""
+) -> tuple[int | None, int | None]:
+    """Best available (min_years, max_years), most trustworthy source first.
+
+    An explicit range beats a seniority label, which beats prose in the body,
+    which beats guessing from the title.
+    """
+    parsed = parse_experience(experience_text)
+    if parsed != (None, None):
+        return parsed
+
+    from_label = board_seniority_years(experience_text)
+    if from_label is not None:
+        return from_label
+
+    from_prose = parse_experience_in_prose(description)
+    if from_prose != (None, None):
+        return from_prose
+
+    return parse_experience(title)
+
+
 def detect_seniority(title: str, experience_text: str = "",
                      min_years: int | None = None) -> str:
     """Classify seniority from title, then experience text, then years."""

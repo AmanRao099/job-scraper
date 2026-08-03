@@ -12,6 +12,8 @@ from app.taxonomy import (
     extract_skills,
     is_tech_job,
     parse_experience,
+    parse_experience_in_prose,
+    resolve_experience,
 )
 
 
@@ -135,6 +137,54 @@ class TestExperience:
     )
     def test_parse(self, text, expected):
         assert parse_experience(text) == expected
+
+    @pytest.mark.parametrize(
+        ("label", "expected"),
+        [
+            # Verbatim from live LinkedIn postings. All previously parsed to
+            # (None, None), and a posting with no experience satisfies every
+            # max_experience filter - so these were reachable in a fresher search.
+            ("Mid-Senior level", (5, None)),
+            ("Associate", (1, 3)),
+            # These two are recognised by parse_experience before the label map.
+            ("Internship", (0, 1)),
+            ("Entry level", (0, 1)),
+            # LinkedIn's default when the poster left the field alone. Genuinely
+            # unknown, and must not be guessed at.
+            ("Not Applicable", (None, None)),
+        ],
+    )
+    def test_board_seniority_labels(self, label, expected):
+        assert resolve_experience(label) == expected
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("Minimum 10+ year(s) of experience is required", (10, None)),
+            ("8+ years of professional experience with distributed systems", (8, None)),
+            ("Qualifications And Skills 0-2 years of experience in JavaScript", (0, 2)),
+            ("2–5 years of total experience; primarily in backend", (2, 5)),
+            ("We welcome freshers to apply", (0, 1)),
+            # The least demanding requirement wins, so a junior-reachable role
+            # is not discarded because it also lists a senior nice-to-have.
+            ("2+ years designing APIs. 8+ years overall preferred.", (2, None)),
+            # Bare numbers in prose mean nothing without a unit.
+            ("Team of 5-10 engineers, salary 10-15 LPA, ships 3-4 releases", (None, None)),
+            # An education requirement is not an experience requirement.
+            ("4 year bachelor degree in Computer Science required", (None, None)),
+        ],
+    )
+    def test_experience_stated_in_prose(self, description, expected):
+        assert parse_experience_in_prose(description) == expected
+
+    def test_explicit_field_outranks_prose(self):
+        """A structured range is more trustworthy than body text."""
+        assert resolve_experience("0-2 Yrs", "Engineer", "requires 9+ years") == (0, 2)
+
+    def test_prose_is_consulted_when_the_field_is_a_placeholder(self):
+        assert resolve_experience(
+            "Not Applicable", "Software Engineer", "Minimum 10+ year(s) of experience"
+        ) == (10, None)
 
     def test_seniority_from_title(self):
         assert detect_seniority("Software Engineer Intern", "") == "intern"
