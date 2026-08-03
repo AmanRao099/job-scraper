@@ -139,14 +139,27 @@ async def purge_old(session: AsyncSession, days: int | None = None) -> int:
 # Reads
 # ---------------------------------------------------------------------------
 
+def _escape_like(value: str) -> str:
+    """Neutralise LIKE wildcards in user input.
+
+    Without this a search for "C_+" would treat the underscore as "any
+    character". Skill names such as "C++" and "Node.js" are safe, but the value
+    arrives from a query string and cannot be assumed to be one of ours.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _apply_filters(stmt, filters: JobFilters):
     if filters.active_only:
         stmt = stmt.where(Job.is_active.is_(True))
 
     if filters.q:
-        needle = f"%{filters.q.lower().strip()}%"
+        needle = f"%{_escape_like(filters.q.lower().strip())}%"
         stmt = stmt.where(
-            or_(Job.search_blob.like(needle), func.lower(Job.description).like(needle))
+            or_(
+                Job.search_blob.like(needle, escape="\\"),
+                func.lower(Job.description).like(needle, escape="\\"),
+            )
         )
 
     if filters.source:
@@ -159,15 +172,24 @@ def _apply_filters(stmt, filters: JobFilters):
         stmt = stmt.where(Job.work_mode.in_([w.lower() for w in filters.work_mode]))
 
     if filters.skill:
-        # Skills are denormalised into search_blob, so one LIKE per requested
-        # skill is enough and stays portable across SQLite/Postgres.
+        # Match the fenced skill token, not a bare substring. '%java%' also
+        # matched "javascript" (46% of results were wrong) and '%r%' matched
+        # every posting in the database. Fencing keeps this portable across
+        # SQLite and Postgres - no JSON operators, still one LIKE per skill.
         for skill in filters.skill:
-            stmt = stmt.where(Job.search_blob.like(f"%{skill.lower().strip()}%"))
+            token = skill.strip().lower()
+            if not token:
+                continue
+            stmt = stmt.where(
+                Job.search_blob.like(f"%|{_escape_like(token)}|%", escape="\\")
+            )
 
     if filters.location:
-        stmt = stmt.where(func.lower(Job.location).like(f"%{filters.location.lower()}%"))
+        needle = f"%{_escape_like(filters.location.lower())}%"
+        stmt = stmt.where(func.lower(Job.location).like(needle, escape="\\"))
     if filters.company:
-        stmt = stmt.where(func.lower(Job.company).like(f"%{filters.company.lower()}%"))
+        needle = f"%{_escape_like(filters.company.lower())}%"
+        stmt = stmt.where(func.lower(Job.company).like(needle, escape="\\"))
 
     if filters.min_experience is not None:
         stmt = stmt.where(

@@ -51,12 +51,24 @@ class TestTechClassification:
             "Database Administrator",
             "SDET",
             "Associate - Cloud Operations",
-            "Graduate Engineer Trainee",
             "UI/UX Designer",
         ],
     )
     def test_accepts_the_breadth_of_it_roles(self, title):
         assert is_tech_job(title) is True
+
+    def test_graduate_engineer_trainee_needs_corroboration(self):
+        """"Graduate Engineer Trainee" is discipline-agnostic in India.
+
+        Mechanical, civil and electrical employers all use it, so the title
+        alone cannot admit a posting - it was letting AutoCAD draughting roles
+        into the index and labelling them Software Engineering. With technical
+        skills attached it is a real software fresher role and is kept.
+        """
+        assert is_tech_job("Graduate Engineer Trainee") is False
+        assert is_tech_job("Graduate Engineer Trainee", skills=["AutoCAD"]) is False
+        assert is_tech_job("Graduate Engineer Trainee", skills=["Java", "SQL"]) is True
+        assert is_tech_job("Graduate Engineer Trainee - Software") is True
 
     @pytest.mark.parametrize(
         "title",

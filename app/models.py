@@ -27,6 +27,22 @@ def utcnow() -> datetime:
 
 _NORMALISE_RE = re.compile(r"[^a-z0-9]+")
 
+# Wraps every skill so each one is delimited on both sides: |python|java|.
+SKILL_FENCE = "|"
+
+
+def skills_fence(skills: list | None) -> str:
+    """Render a skill list as `|a|b|c|`, or "" when there are none.
+
+    Both ends are closed so the first and last entries are delimited exactly
+    like the middle ones - without that, '%|java|%' would miss a posting whose
+    only skill is Java.
+    """
+    cleaned = [str(s).strip().lower() for s in (skills or []) if str(s).strip()]
+    if not cleaned:
+        return ""
+    return SKILL_FENCE + SKILL_FENCE.join(cleaned) + SKILL_FENCE
+
 
 def make_fingerprint(title: str, company: str, location: str = "") -> str:
     """Stable dedup key.
@@ -84,7 +100,8 @@ class Job(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
-    # lowercase haystack for LIKE search (title + company + location + skills)
+    # Lowercase haystack for LIKE search. Free text spans the whole string;
+    # skills are additionally pipe-delimited so they can be matched exactly.
     search_blob: Mapped[str] = mapped_column(Text, default="")
 
     __table_args__ = (
@@ -94,14 +111,22 @@ class Job(Base):
     )
 
     def build_search_blob(self) -> str:
+        """Free-text haystack, with skills fenced for exact matching.
+
+        Skills are emitted as `|python|java|` rather than plain words because a
+        bare LIKE '%java%' also matches "javascript", and LIKE '%r%' matches
+        essentially every posting. Fencing lets the skill filter ask for
+        '%|java|%' and get only real Java roles, while free-text search still
+        works over the whole string.
+        """
         parts = [
             self.title or "",
             self.company or "",
             self.location or "",
-            " ".join(self.skills or []),
             self.category or "",
+            skills_fence(self.skills),
         ]
-        return " ".join(parts).lower()
+        return " ".join(part for part in parts if part).lower()
 
 
 class ScrapeRun(Base):

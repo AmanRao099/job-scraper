@@ -122,6 +122,34 @@ class TestSearch:
         _, one = await repo.search_jobs(session, repo.JobFilters(skill=["React"]))
         assert both == 0 and one == 1
 
+    async def test_skill_filter_does_not_match_substrings(self, session):
+        """Java must not match JavaScript.
+
+        The blob was searched with a bare LIKE '%java%', so on live data 46% of
+        skill=Java results listed only JavaScript. Every returned row must
+        genuinely carry the requested skill.
+        """
+        rows, _ = await repo.search_jobs(session, repo.JobFilters(skill=["Java"]))
+        for row in rows:
+            assert "Java" in row.skills, f"{row.title} matched Java via {row.skills}"
+
+    async def test_single_letter_skill_does_not_match_everything(self, session):
+        """skill=R matched 342 of 343 live postings - every "r" in the blob."""
+        rows, total = await repo.search_jobs(session, repo.JobFilters(skill=["R"]))
+        assert total < len(SAMPLES)
+        for row in rows:
+            assert "R" in row.skills
+
+    async def test_skill_filter_matches_a_sole_skill(self, session):
+        """The fence has to close at both ends or first/last skills are missed."""
+        _, total = await repo.search_jobs(session, repo.JobFilters(skill=["SQL"]))
+        assert total >= 1
+
+    async def test_like_wildcards_in_input_are_literal(self, session):
+        """A query of "%" must not behave as "match everything"."""
+        _, total = await repo.search_jobs(session, repo.JobFilters(q="%"))
+        assert total == 0
+
     async def test_company_filter_is_case_insensitive(self, session):
         _, total = await repo.search_jobs(session, repo.JobFilters(company="acme"))
         assert total == 2

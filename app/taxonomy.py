@@ -317,7 +317,7 @@ CATEGORIES: dict[str, list[str]] = {
     "Software Engineering": [
         "software engineer", "software developer", "programmer analyst",
         "application developer", "software development engineer", "sde",
-        "member of technical staff", "systems engineer", "graduate engineer trainee",
+        "member of technical staff", "systems engineer",
         "programmer", "technical consultant", "software architect",
     ],
 }
@@ -418,7 +418,13 @@ STRONG_TECH_TERMS = [
     "ux designer", "ui designer", "ui/ux designer", "product designer",
     "scrum master", "technical writer", "technical consultant",
     "salesforce developer", "sap consultant", "abap", "servicenow developer",
-    "graduate engineer trainee", "member of technical staff", "technology analyst",
+    # "graduate engineer trainee" (GET) is deliberately absent: in India it is a
+    # discipline-agnostic fresher title used by mechanical, civil and electrical
+    # employers too. As a strong term it bypassed the non-tech veto, admitting
+    # AutoCAD draughting roles and labelling them Software Engineering. It now
+    # falls through to the generic-role path, which requires a tech qualifier or
+    # a genuinely technical skill list.
+    "member of technical staff", "technology analyst",
     "systems engineer", "support engineer", "implementation engineer",
     "integration engineer", "middleware", "mainframe", "etl developer",
     "bi developer", "business intelligence", "power bi developer", "tableau developer",
@@ -531,9 +537,12 @@ SENIORITY_LEVELS = ["intern", "fresher", "junior", "mid", "senior", "lead"]
 _INTERN_RE = _compile(["intern", "internship", "summer intern", "apprentice", "apprenticeship"])
 _FRESHER_RE = _compile([
     "fresher", "freshers", "entry level", "entry-level", "graduate", "new graduate",
-    "campus hire", "trainee", "graduate engineer trainee", "get", "no experience",
+    "campus hire", "trainee", "graduate engineer trainee", "no experience",
     "0 experience", "zero experience", "college graduate", "recent graduate",
 ])
+# "get" (the GET acronym) is intentionally not above: it is an ordinary English
+# verb, so it matched titles like "Get Started Program" and forced them to
+# fresher. "trainee" and "graduate engineer trainee" already cover the real case.
 _JUNIOR_RE = _compile(["junior", "jr", "associate", "sde 1", "sde-1", "sde i", "level 1"])
 _SENIOR_RE = _compile(["senior", "sr", "sde 3", "sde-3", "staff", "principal", "specialist iv"])
 _LEAD_RE = _compile([

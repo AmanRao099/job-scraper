@@ -183,6 +183,36 @@ async def _import(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _reindex(args: argparse.Namespace) -> int:
+    """Recompute search_blob for every stored job.
+
+    Rows are only rewritten when a scrape re-sees them, so a change to the blob
+    format leaves older postings unsearchable until then. This applies it to the
+    whole table at once. Safe to re-run: the blob is derived data.
+    """
+    from sqlalchemy import select
+
+    from app.db import init_db, session_scope
+    from app.models import Job
+
+    await init_db()
+
+    scanned = changed = 0
+    async with session_scope() as session:
+        rows = (await session.execute(select(Job))).scalars().all()
+        for job in rows:
+            scanned += 1
+            rebuilt = job.build_search_blob()
+            if rebuilt != job.search_blob:
+                job.search_blob = rebuilt
+                changed += 1
+            if args.verbose and changed and changed % 500 == 0:
+                print(f"  ... {changed} rewritten", flush=True)
+
+    print(f"Reindexed {scanned} jobs, {changed} updated, {scanned - changed} already current.")
+    return 0
+
+
 async def _stats(_: argparse.Namespace) -> int:
     from app.db import SessionLocal, init_db
     from app.models import Job
@@ -248,6 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
     importer = sub.add_parser("import", help="Backfill from a legacy JSONL file")
     importer.add_argument("path", nargs="?", default="output/jobs.jsonl")
     importer.set_defaults(func=_import, is_async=True)
+
+    reindex = sub.add_parser(
+        "reindex", help="Rebuild the search index for every stored job"
+    )
+    reindex.add_argument("--verbose", action="store_true")
+    reindex.set_defaults(func=_reindex, is_async=True)
 
     stats = sub.add_parser("stats", help="Show database counts")
     stats.set_defaults(func=_stats, is_async=True)

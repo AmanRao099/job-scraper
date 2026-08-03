@@ -92,6 +92,12 @@ jobs:
           # touching one a live API server may have started minutes ago.
           python main.py scrape --stale-after 45 $ARGS
 
+      # Cheap and idempotent. Keeps older postings searchable after a change to
+      # the search-blob format, instead of waiting for each to be re-scraped.
+      - name: Rebuild search index
+        if: success()
+        run: python main.py reindex
+
       - name: Show database totals
         if: always()
         run: python main.py stats
