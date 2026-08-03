@@ -92,9 +92,10 @@ jobs:
           # touching one a live API server may have started minutes ago.
           python main.py scrape --stale-after 45 $ARGS
 
-      # Cheap and idempotent. Keeps older postings searchable after a change to
-      # the search-blob format, instead of waiting for each to be re-scraped.
-      - name: Rebuild search index
+      # Cheap and idempotent. Re-applies the current taxonomy and search format
+      # to rows collected under older rules, which would otherwise stay wrong
+      # until re-scraped - and a row that no longer qualifies never is.
+      - name: Reindex and reclassify
         if: success()
         run: python main.py reindex
 
