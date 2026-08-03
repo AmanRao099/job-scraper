@@ -98,11 +98,16 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
+    # For frontends on rotating hostnames (preview deploys). Ignored when empty.
+    allow_origin_regex=settings.cors_origin_regex or None,
     # Credentials cannot be combined with a wildcard origin per the CORS spec;
     # browsers reject that pairing outright.
     allow_credentials=bool(settings.cors_origins),
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    # Cache the preflight so a filter UI firing a request per keystroke does not
+    # pay for an OPTIONS round-trip each time.
+    max_age=600,
 )
 
 

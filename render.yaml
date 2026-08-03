@@ -1,0 +1,76 @@
+# Render Blueprint - free tier.
+#
+# Render's free web service has an ephemeral disk and stops after 15 minutes of
+# no traffic, so it holds no state: DATABASE_URL points at Neon Postgres and the
+# scheduler is off (GitHub Actions runs the scrapes). Everything this service
+# does is read from Postgres and serve JSON.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo.
+# Then set DATABASE_URL in the dashboard (marked sync:false, so it is never
+# committed). Full walkthrough in DEPLOY.md.
+
+services:
+  - type: web
+    name: job-scraper-api
+    # Render's native Python runtime, not Docker: nothing here needs system
+    # packages, so a plain pip install is a faster build and one less moving
+    # part. (Dockerfile.api still exists for container hosts that need it.)
+    runtime: python
+    plan: free
+    region: singapore          # closest free region to the Indian job boards
+    buildCommand: pip install -r requirements.txt
+    # $PORT is assigned by Render. One worker: the scrape lock is per-process.
+    # Trusted-proxy config is passed via FORWARDED_ALLOW_IPS below rather than a
+    # CLI flag, so no shell quoting of "*" is involved.
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # ---- set these in the dashboard --------------------------------
+      # Neon connection string. Paste it exactly as Neon gives it
+      # (postgresql://…?sslmode=require); the app rewrites it for asyncpg.
+      - key: DATABASE_URL
+        sync: false
+      # Your frontend's origin(s), comma separated, scheme included, no
+      # trailing slash. Include your dev server too:
+      #   https://app.example.com,http://localhost:5173
+      - key: CORS_ORIGINS
+        sync: false
+      # Optional. Only needed if your frontend's hostname changes per deploy;
+      # leave blank otherwise. Example: https://.*\.my-app\.vercel\.app
+      - key: CORS_ORIGIN_REGEX
+        sync: false
+
+      # ---- generated once, then stable -------------------------------
+      # Required by POST /scrape/run and the maintenance endpoint as
+      # X-Admin-Token. Copy the generated value into your GitHub secrets.
+      - key: ADMIN_TOKEN
+        generateValue: true
+
+      # ---- fixed -----------------------------------------------------
+      # Render terminates TLS at its edge proxy and forwards over plain HTTP.
+      # Without trusting its X-Forwarded-Proto header, request.base_url reports
+      # "http://" and POST /scrape/run hands back a stream_url that browsers
+      # refuse to load from an https page as mixed content.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      # The scraper runs in GitHub Actions. A free instance that sleeps cannot
+      # keep a 6-hour timer anyway.
+      - key: SCHEDULER_ENABLED
+        value: "false"
+      - key: SCRAPE_ON_STARTUP
+        value: "false"
+      # No Chromium in this image. LinkedIn's guest API is plain HTTP, so a
+      # manually triggered scrape from here still works - just LinkedIn only.
+      - key: PLAYWRIGHT_FALLBACK
+        value: "false"
+      - key: SOURCES_ENABLED
+        value: linkedin
+      - key: DEFAULT_PAGE_SIZE
+        value: "25"
+      - key: MAX_PAGE_SIZE
+        value: "200"

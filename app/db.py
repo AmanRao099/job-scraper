@@ -29,13 +29,23 @@ class Base(DeclarativeBase):
     pass
 
 
+_engine_options: dict = {}
+if not settings.is_sqlite:
+    # Free Postgres tiers (Neon, Supabase) suspend an idle compute and drop the
+    # TCP connection with it. Pre-ping plus a short recycle means the next
+    # request transparently reconnects instead of raising ConnectionDoesNotExist.
+    # The pool stays small because free tiers cap total connections low and the
+    # API server and the scraper both draw from it.
+    _engine_options = {"pool_recycle": 280, "pool_size": 5, "max_overflow": 5}
+
 engine = create_async_engine(
     settings.database_url,
     echo=False,
     pool_pre_ping=True,
     # SQLite's default single connection serialises writers; that is what we
     # want, but reads should not block behind the scraper's write batches.
-    connect_args={"timeout": 30} if settings.is_sqlite else {},
+    connect_args=settings.db_connect_args,
+    **_engine_options,
 )
 
 SessionLocal = async_sessionmaker(

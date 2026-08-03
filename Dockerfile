@@ -1,7 +1,10 @@
-# Chromium is required: Naukri's JSON API is reCAPTCHA-gated and its search
-# page is client-rendered, so that source has to be rendered. If you run
-# LinkedIn only, set PLAYWRIGHT_FALLBACK=false and you can drop the browser
-# stage entirely for a ~700MB smaller image.
+# Full image: API + scraper, Chromium included. This is what docker-compose and
+# any self-hosted single-box deploy use.
+#
+# Chromium is required because Naukri's JSON API is reCAPTCHA-gated and its
+# search page is client-rendered. If you only need the read API (the deployed
+# setup in DEPLOY.md, where scraping happens in GitHub Actions), build
+# Dockerfile.api instead - same code, ~700MB smaller, no browser.
 FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
@@ -15,8 +18,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-scrape.txt ./
+RUN pip install --no-cache-dir -r requirements-scrape.txt
 
 # Installs the full Chromium build (needed for Chrome's new headless mode,
 # which is what gets past bot detection) plus its system libraries.

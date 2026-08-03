@@ -7,8 +7,9 @@ pydantic-settings>=2.6,<3.0
 # --- storage -----------------------------------------------------------
 SQLAlchemy>=2.0.36,<3.0
 aiosqlite>=0.20
-# Uncomment to run against Postgres instead of SQLite:
-# asyncpg>=0.30
+# Postgres. Used whenever DATABASE_URL points at one (all deployed environments
+# do; SQLite has no persistent disk on a free host).
+asyncpg>=0.30
 
 # --- scraping ----------------------------------------------------------
 httpx[http2]>=0.27,<1.0
@@ -18,6 +19,6 @@ lxml>=5.3
 # --- scheduling --------------------------------------------------------
 APScheduler>=3.10,<4.0
 
-# --- optional browser fallback -----------------------------------------
-# Only needed if PLAYWRIGHT_FALLBACK=true. Skip it for a slim image.
-playwright>=1.49
+# Playwright is NOT here on purpose: it pulls a ~700MB Chromium download that
+# the read-only API never touches. Anything that actually scrapes Naukri
+# installs requirements-scrape.txt instead (which includes this file).

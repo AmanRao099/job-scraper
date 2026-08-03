@@ -25,8 +25,8 @@ a scrape.
 ```bash
 python -m venv venv
 venv\Scripts\activate            # Linux/macOS: source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium      # required for Naukri, see "Sources" below
+pip install -r requirements-scrape.txt   # API + browser. Read-only API: requirements.txt
+playwright install chromium              # required for Naukri, see "Sources" below
 
 cp .env.example .env             # optional, all values have defaults
 
@@ -219,13 +219,25 @@ networking, database, ERP, embedded, and design.
 
 ## Deployment
 
+**Hosted API, free tier → [DEPLOY.md](DEPLOY.md).** Neon Postgres for storage,
+GitHub Actions cron for the scraping (the only free tier with enough RAM to run
+Chromium), Render for the read API. The scraper and the API are separate
+processes that only meet in the database, which is what keeps each one small
+enough to fit in a free tier.
+
+**One box you control:**
+
 ```bash
 docker compose up -d --build
 ```
 
-The compose file mounts a named volume at `/app/data` so postings survive
-redeploys, and sets `shm_size: 1gb` because Chromium needs more than Docker's
-default 64MB of shared memory.
+That runs API, scheduler and Chromium in a single container. The compose file
+mounts a named volume at `/app/data` so postings survive redeploys, and sets
+`shm_size: 1gb` because Chromium needs more than Docker's default 64MB of
+shared memory.
+
+Two images are defined: `Dockerfile` (everything, ~1.1GB) and `Dockerfile.api`
+(no browser, ~180MB) for hosts that only serve reads.
 
 Before exposing it publicly:
 

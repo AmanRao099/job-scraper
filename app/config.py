@@ -6,25 +6,70 @@ production without code changes. See `.env.example` for the full list.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# pydantic-settings JSON-decodes env values for list-typed fields *before* any
+# validator runs, so CORS_ORIGINS=https://a.com,https://b.com would raise
+# SettingsError rather than reaching `_split_csv`. NoDecode hands the validator
+# the raw string instead. Comma-separated is the only form a hosting
+# dashboard's single-line env var field can reasonably express.
+CsvList = Annotated[list[str], NoDecode]
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
+# libpq accepts these in the connection string; asyncpg does not and raises
+# TypeError on an unexpected keyword. Managed Postgres providers (Neon, Supabase,
+# Render) all hand out URLs containing them, so strip and translate instead.
+_LIBPQ_ONLY_PARAMS = {"sslmode", "channel_binding", "options", "target_session_attrs"}
+
 
 def _as_list(value: object) -> list[str]:
-    """Accept either a real list or a comma-separated env string."""
+    """Accept a real list, a comma-separated env string, or a JSON array."""
     if value is None:
         return []
     if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
+        text = value.strip()
+        # NoDecode turns off pydantic's JSON decoding for these fields, so
+        # handle the array form here for anyone whose env already used it.
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                return _as_list(json.loads(text))
+            except json.JSONDecodeError:
+                pass
+        return [item.strip() for item in text.split(",") if item.strip()]
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _normalize_database_url(url: str) -> str:
+    """Make a provider-issued Postgres URL usable by SQLAlchemy + asyncpg.
+
+    Hosting dashboards give you a libpq URL (`postgres://…?sslmode=require`).
+    Pasting that verbatim is the single most common deploy failure, so rewrite
+    it here rather than making every environment get the syntax right.
+    """
+    if not url.startswith(("postgres://", "postgresql://", "postgresql+")):
+        return url
+
+    parts = urlsplit(url)
+    scheme = parts.scheme
+    if scheme in ("postgres", "postgresql"):
+        scheme = "postgresql+asyncpg"
+
+    if scheme == "postgresql+asyncpg":
+        kept = [(k, v) for k, v in parse_qsl(parts.query) if k not in _LIBPQ_ONLY_PARAMS]
+        parts = parts._replace(query=urlencode(kept))
+
+    return urlunsplit(parts._replace(scheme=scheme))
 
 
 class Settings(BaseSettings):
@@ -50,7 +95,11 @@ class Settings(BaseSettings):
     # When set, mutating endpoints (/scrape/run, /jobs/purge) require
     # `X-Admin-Token`. Leave empty in local dev to disable the check.
     admin_token: str = ""
-    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    cors_origins: CsvList = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    # Escape hatch for frontends whose hostname is not fixed - preview deploys
+    # get a fresh subdomain per branch, which no static list can cover.
+    # Anchored automatically; e.g. https://.*\.my-app\.vercel\.app
+    cors_origin_regex: str = ""
     default_page_size: int = 25
     max_page_size: int = 200
 
@@ -64,7 +113,7 @@ class Settings(BaseSettings):
     purge_after_days: int = 60
 
     # ------------------------------------------------------------ scraping
-    sources_enabled: list[str] = ["naukri", "linkedin"]
+    sources_enabled: CsvList = ["naukri", "linkedin"]
     # Concurrent outbound HTTP requests across the whole pipeline.
     http_concurrency: int = 12
     http_timeout: float = 25.0
@@ -104,9 +153,29 @@ class Settings(BaseSettings):
     def _split_csv(cls, value: object) -> list[str]:
         return _as_list(value)
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _fix_database_url(cls, value: object) -> object:
+        return _normalize_database_url(value) if isinstance(value, str) else value
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    @property
+    def is_postgres(self) -> bool:
+        return self.database_url.startswith("postgresql")
+
+    @property
+    def db_connect_args(self) -> dict:
+        if self.is_sqlite:
+            return {"timeout": 30}
+        if self.is_postgres:
+            # Every free managed Postgres requires TLS. asyncpg spells it `ssl`,
+            # and "require" encrypts without verifying the CA - which is what
+            # `sslmode=require` in the provider's own URL already meant.
+            return {"ssl": "require", "server_settings": {"application_name": self.app_name}}
+        return {}
 
 
 @lru_cache(maxsize=1)
