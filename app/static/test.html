@@ -29,6 +29,8 @@
   button.ghost:hover:not(:disabled) { color:var(--text); border-color:var(--accent); }
   button.danger { background:var(--err); }
   button.danger:hover:not(:disabled) { background:#dc2626; }
+  button.focus { background:#7c3aed; }
+  button.focus:hover:not(:disabled) { background:#6d28d9; }
   .log .l-warning { color:#fcd34d; }
 
   .bar {
@@ -106,6 +108,7 @@
   <div class="row" style="margin:0">
     <input id="adminToken" type="password" placeholder="X-Admin-Token (if set)" style="width:210px" />
     <button id="btnScrape">▶ Run scrape</button>
+    <button id="btnScrapeBlr" class="focus" title="Freshers · Bengaluru · startups only">🚀 Bengaluru freshers @ startups</button>
     <button id="btnStop" class="danger" disabled>■ Stop</button>
     <button class="ghost" id="btnRefresh">↻ Reload</button>
   </div>
@@ -125,6 +128,9 @@
     <aside class="card filters">
       <label>Search
         <input id="f-q" type="search" placeholder="title, company, skill…" />
+      </label>
+      <label>Location
+        <input id="f-location" type="search" placeholder="e.g. Bengaluru" />
       </label>
       <label>Category <select id="f-category"><option value="">All</option></select></label>
       <label>Source <select id="f-source"><option value="">All</option></select></label>
@@ -241,7 +247,7 @@ async function call(path, { method = 'GET', body } = {}) {
 }
 
 /* ------------------------------------------------------------- filters */
-const FILTER_IDS = ['q','category','source','seniority','work_mode','skill','max_experience','posted_within_days','sort'];
+const FILTER_IDS = ['q','location','category','source','seniority','work_mode','skill','max_experience','posted_within_days','sort'];
 
 function queryString() {
   const p = new URLSearchParams();
@@ -388,6 +394,7 @@ async function loadRuns() {
 function setRunning(runId) {
   activeRun = runId;
   $('btnScrape').disabled = !!runId;
+  $('btnScrapeBlr').disabled = !!runId;
   $('btnStop').disabled = !runId;
   $('btnStop').textContent = '■ Stop';
 }
@@ -452,11 +459,12 @@ $('btnStop').onclick = async () => {
   }
 };
 
-$('btnScrape').onclick = async () => {
+async function startScrape(body = {}) {
   banner('');
   $('btnScrape').disabled = true;
+  $('btnScrapeBlr').disabled = true;
   try {
-    const res = await call('/scrape/run', { method: 'POST', body: {} });
+    const res = await call('/scrape/run', { method: 'POST', body });
     document.querySelector('.tab[data-view="runs"]').click();
     streamRun(res.run_id);
   } catch (e) {
@@ -465,7 +473,14 @@ $('btnScrape').onclick = async () => {
     else if (e.status === 409) banner('409 — a scrape is already running.');
     else banner('POST /scrape/run failed: ' + e.message);
   }
-};
+}
+
+$('btnScrape').onclick = () => startScrape({});
+
+// Targeted run: fresher-slanted queries scoped to Bengaluru, then filtered down
+// to postings in the city, at most a year of experience, from a company that
+// reads as a startup. The server owns the definition; see GET /scrape/profiles.
+$('btnScrapeBlr').onclick = () => startScrape({ profile: 'bangalore-fresher-startups' });
 
 /* ----------------------------------------------------------------- raw */
 $('btnRaw').onclick = async () => {
@@ -493,11 +508,13 @@ for (const tab of document.querySelectorAll('.tab')) {
 }
 
 let debounce;
-$('f-q').addEventListener('input', () => {
+const debounced = () => {
   clearTimeout(debounce);
   debounce = setTimeout(() => { page = 1; loadJobs(); }, 350);
-});
-for (const id of FILTER_IDS.filter((i) => i !== 'q')) {
+};
+$('f-q').addEventListener('input', debounced);
+$('f-location').addEventListener('input', debounced);
+for (const id of FILTER_IDS.filter((i) => i !== 'q' && i !== 'location')) {
   $('f-' + id).addEventListener('change', () => { page = 1; loadJobs(); });
 }
 $('btnClear').onclick = () => {

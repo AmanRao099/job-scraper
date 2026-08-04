@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.http_client import HttpClient
-from app.sources.base import JobSource, RawJob
+from app.sources.base import JobSource, RawJob, SearchScope
 from app.sources.browser import BrowserRenderer
 from app.utils import (
     absolute_url,
@@ -61,8 +62,9 @@ class LinkedInSource(JobSource):
     name = "linkedin"
 
     def __init__(self, client: HttpClient, progress=None,
-                 renderer: BrowserRenderer | None = None) -> None:
-        super().__init__(client, progress)
+                 renderer: BrowserRenderer | None = None,
+                 scope: SearchScope | None = None) -> None:
+        super().__init__(client, progress, scope)
         self.renderer = renderer
         self.pages = max(1, settings.linkedin_pages)
         self._desc_semaphore = asyncio.Semaphore(DESCRIPTION_CONCURRENCY)
@@ -117,8 +119,8 @@ class LinkedInSource(JobSource):
     async def _fetch_page(self, query: str, page: int) -> list[RawJob]:
         params = {
             "keywords": query,
-            "location": settings.location,
-            "geoId": settings.linkedin_geo_id,
+            "location": self.scope.location,
+            "geoId": self.scope.linkedin_geo_id,
             "f_E": EXPERIENCE_FILTER,
             "f_TPR": f"r{settings.max_posting_age_days * 86400}"
             if settings.max_posting_age_days
@@ -243,8 +245,8 @@ class LinkedInSource(JobSource):
             return []
 
         url = (
-            f"{BASE}/jobs/search?keywords={query.replace(' ', '%20')}"
-            f"&location={settings.location}&geoId={settings.linkedin_geo_id}"
+            f"{BASE}/jobs/search?keywords={quote(query)}"
+            f"&location={quote(self.scope.location)}&geoId={self.scope.linkedin_geo_id}"
             f"&f_E={EXPERIENCE_FILTER}"
         )
         logger.info("LinkedIn guest API returned nothing for %r; falling back to browser", query)

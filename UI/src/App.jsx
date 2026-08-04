@@ -10,6 +10,7 @@ import {
   Loader2,
   MapPin,
   Play,
+  Rocket,
   Search,
   Terminal,
   X,
@@ -20,6 +21,7 @@ const PAGE_SIZE = 20;
 
 const EMPTY_FILTERS = {
   q: '',
+  location: '',
   category: '',
   source: '',
   skills: [],
@@ -184,6 +186,7 @@ function RunConsole({ runId, onFinished }) {
 export default function App() {
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [debouncedQ, setDebouncedQ] = useState('');
+  const [debouncedLocation, setDebouncedLocation] = useState('');
   const [page, setPage] = useState(1);
 
   const [jobs, setJobs] = useState([]);
@@ -194,15 +197,22 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [runId, setRunId] = useState(null);
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState(null);
+  const [profiles, setProfiles] = useState([]);
 
-  // Debounce the search box so typing does not fire a request per keystroke.
+  // Debounce the text boxes so typing does not fire a request per keystroke.
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQ(filters.q), 350);
+    const timer = setTimeout(() => {
+      setDebouncedQ(filters.q);
+      setDebouncedLocation(filters.location);
+    }, 350);
     return () => clearTimeout(timer);
-  }, [filters.q]);
+  }, [filters.q, filters.location]);
 
-  const activeFilters = useMemo(() => ({ ...filters, q: debouncedQ }), [filters, debouncedQ]);
+  const activeFilters = useMemo(
+    () => ({ ...filters, q: debouncedQ, location: debouncedLocation }),
+    [filters, debouncedQ, debouncedLocation],
+  );
 
   const loadJobs = useCallback(async () => {
     setLoading(true);
@@ -245,6 +255,7 @@ export default function App() {
     setPage(1);
   }, [
     debouncedQ,
+    debouncedLocation,
     filters.category,
     filters.source,
     filters.seniority,
@@ -253,6 +264,15 @@ export default function App() {
     filters.postedWithinDays,
     filters.skills,
   ]);
+
+  // Targeted scrapes are defined server-side, so render whatever it offers
+  // rather than hard-coding one button per profile here.
+  useEffect(() => {
+    api
+      .scrapeProfiles()
+      .then(setProfiles)
+      .catch(() => {});
+  }, []);
 
   // Reattach to a scrape that is already running (e.g. after a page refresh).
   useEffect(() => {
@@ -275,10 +295,11 @@ export default function App() {
         : [...prev.skills, skill],
     }));
 
-  const startScrape = async () => {
-    setStarting(true);
+  /** `profileKey` runs a targeted profile; omit it for the nationwide sweep. */
+  const startScrape = async (profileKey = null) => {
+    setStarting(profileKey ?? 'all');
     try {
-      const { run_id: id } = await api.startScrape({});
+      const { run_id: id } = await api.startScrape(profileKey ? { profile: profileKey } : {});
       setRunId(id);
     } catch (err) {
       const status = err.response?.status;
@@ -290,7 +311,7 @@ export default function App() {
             : 'Could not start the scrape.',
       );
     } finally {
-      setStarting(false);
+      setStarting(null);
     }
   };
 
@@ -301,6 +322,7 @@ export default function App() {
 
   const hasFilters =
     debouncedQ ||
+    debouncedLocation ||
     filters.category ||
     filters.source ||
     filters.seniority ||
@@ -326,10 +348,27 @@ export default function App() {
               <StatTile icon={Clock} label="added today" value={stats.jobs_added_today} />
             </div>
           )}
-          <button className="btn" onClick={startScrape} disabled={starting || !!runId}>
-            {starting ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
+          <button className="btn" onClick={() => startScrape()} disabled={!!starting || !!runId}>
+            {starting === 'all' ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
             {runId ? 'Scraping…' : 'Refresh now'}
           </button>
+
+          {profiles.map((profile) => (
+            <button
+              key={profile.key}
+              className="btn focus"
+              title={profile.description}
+              onClick={() => startScrape(profile.key)}
+              disabled={!!starting || !!runId}
+            >
+              {starting === profile.key ? (
+                <Loader2 size={16} className="spin" />
+              ) : (
+                <Rocket size={16} />
+              )}
+              {profile.label}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -350,6 +389,16 @@ export default function App() {
               placeholder="Search title, company, skills…"
               value={filters.q}
               onChange={(e) => update('q', e.target.value)}
+            />
+          </label>
+
+          <label className="field">
+            <span className="field-label">Location</span>
+            <input
+              type="search"
+              placeholder="e.g. Bengaluru"
+              value={filters.location}
+              onChange={(e) => update('location', e.target.value)}
             />
           </label>
 

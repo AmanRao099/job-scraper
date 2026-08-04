@@ -24,6 +24,7 @@ function toParams(filters, page, pageSize) {
   };
 
   add('q', filters.q);
+  add('location', filters.location);
   add('category', filters.category);
   add('source', filters.source);
   add('skill', filters.skills);
@@ -47,6 +48,7 @@ export const api = {
   meta: () => client.get('/meta').then((r) => r.data),
   runs: (limit = 5) =>
     client.get('/scrape/runs', { params: { limit } }).then((r) => r.data),
+  scrapeProfiles: () => client.get('/scrape/profiles').then((r) => r.data),
   startScrape: (body = {}) => client.post('/scrape/run', body).then((r) => r.data),
   streamUrl: (runId) => `${API_BASE}/scrape/runs/${runId}/stream`,
 };

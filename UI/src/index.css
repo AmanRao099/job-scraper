@@ -9,6 +9,8 @@
   --accent-hover: #2563eb;
   --success: #10b981;
   --danger: #ef4444;
+  --focus: #7c3aed;
+  --focus-hover: #6d28d9;
   --radius: 14px;
 
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -148,6 +150,13 @@ select {
 .btn.ghost:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.05);
   color: var(--text);
+}
+/* Targeted scrape profiles - visually distinct from the plain refresh. */
+.btn.focus {
+  background: var(--focus);
+}
+.btn.focus:hover:not(:disabled) {
+  background: var(--focus-hover);
 }
 
 .alert {

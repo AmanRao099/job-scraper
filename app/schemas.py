@@ -106,6 +106,24 @@ class ScrapeRequest(BaseModel):
     query_limit: int | None = Field(
         default=None, ge=1, le=500, description="Cap the number of queries (useful for smoke tests)"
     )
+    profile: str | None = Field(
+        default=None,
+        description=(
+            "Run a targeted profile instead of the nationwide sweep, e.g. "
+            "'bangalore-fresher-startups'. See GET /scrape/profiles."
+        ),
+    )
+
+
+class ScrapeProfileOut(BaseModel):
+    key: str
+    label: str
+    description: str
+    location: str
+    queries: list[str]
+    query_count: int
+    max_experience_years: int
+    require_startup: bool
 
 
 class ScrapeRunOut(UTCModel):

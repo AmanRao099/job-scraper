@@ -288,8 +288,21 @@ async def skill_counts(session: AsyncSession, limit: int = 60) -> list[dict]:
 # Scrape runs
 # ---------------------------------------------------------------------------
 
-async def create_run(session: AsyncSession, sources: list[str], trigger: str) -> ScrapeRun:
-    run = ScrapeRun(status="running", trigger=trigger, sources=sources, started_at=utcnow())
+async def create_run(
+    session: AsyncSession,
+    sources: list[str],
+    trigger: str,
+    stats: dict | None = None,
+) -> ScrapeRun:
+    """Open a run row. `stats` seeds it with what is already known (e.g. the
+    scrape profile), so a *running* run is self-describing in `/scrape/runs`."""
+    run = ScrapeRun(
+        status="running",
+        trigger=trigger,
+        sources=sources,
+        started_at=utcnow(),
+        stats=stats or {},
+    )
     session.add(run)
     await session.flush()
     return run

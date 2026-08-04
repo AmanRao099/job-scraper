@@ -409,6 +409,24 @@ class TestHttp:
             assert (await client.get("/stats")).status_code == 200
             assert (await client.get("/meta")).status_code == 200
 
+    async def test_scrape_profiles_are_listed_and_validated(self, session):
+        from httpx import ASGITransport, AsyncClient
+
+        from app.api import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            listing = await client.get("/scrape/profiles")
+            assert listing.status_code == 200
+            keys = [profile["key"] for profile in listing.json()]
+            assert "bangalore-fresher-startups" in keys
+
+            assert "scrape_profiles" in (await client.get("/meta")).json()
+
+            # An unknown profile must fail the request, not a background task.
+            unknown = await client.post("/scrape/run", json={"profile": "mars-office"})
+            assert unknown.status_code == 400
+
     async def test_admin_token_is_enforced_when_configured(self, session, monkeypatch):
         from httpx import ASGITransport, AsyncClient
 

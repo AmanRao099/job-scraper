@@ -36,8 +36,9 @@ python main.py serve                                  # API on :8000
 
 Then open **<http://localhost:8000/>** — a zero-dependency test console is
 served by the API itself (same-origin, so no CORS setup and no build step). It
-lets you browse and filter jobs, expand descriptions, trigger a scrape and
-watch its live log, and hit any endpoint by hand.
+lets you browse and filter jobs, expand descriptions, trigger a scrape (either
+the full sweep or a targeted profile) and watch its live log, and hit any
+endpoint by hand.
 
 Interactive API docs: <http://localhost:8000/docs>
 
@@ -135,6 +136,7 @@ curl "http://localhost:8000/jobs?category=Backend&skill=Python&skill=Django&max_
 | `GET` | `/jobs/{id}` | One posting, including the full description |
 | `GET` | `/filters` | Facet counts for building filter UI (cached 3 min) |
 | `GET` | `/stats` | Totals, breakdowns, last run summary |
+| `GET` | `/scrape/profiles` | Targeted scrape presets (see below) |
 | `POST` | `/scrape/run` | Start a scrape in the background → `202` + `run_id` |
 | `GET` | `/scrape/runs` | Recent runs |
 | `GET` | `/scrape/runs/{id}` | Status, progress, stats |
@@ -167,6 +169,62 @@ postings.
 If the row says `running` but no task in this process owns it (the previous
 process died), the endpoint reports it as orphaned and clears it, so it stops
 blocking future scrapes.
+
+---
+
+## Targeted scrapes (profiles)
+
+A normal run sweeps ~95 search terms across all of India. A **profile** narrows
+that on three axes at once — which terms to search, which city to search them
+in, and which postings survive afterwards — so one button produces a listing you
+would otherwise assemble by hand.
+
+Both UIs render a button per profile (the purple one, next to "Run scrape"), and
+every entry point takes the same key:
+
+```bash
+curl -X POST localhost:8000/scrape/run -H 'content-type: application/json' \
+     -d '{"profile": "bangalore-fresher-startups"}'
+
+python main.py scrape --profile bangalore-fresher-startups
+```
+
+`GET /scrape/profiles` returns the catalogue, including each profile's queries,
+so a frontend never hard-codes one.
+
+### `bangalore-fresher-startups`
+
+Entry-level tech roles in Bengaluru at companies that read as startups.
+
+| Stage | What it does |
+|---|---|
+| Search | 32 fresher-slanted terms (`fresher software engineer`, `founding engineer`, `data analyst fresher`, …) scoped to the city — LinkedIn by `geoId=105214831`, Naukri by URL slug `…-jobs-in-bangalore` |
+| Location | Keeps only postings whose location names Bengaluru/Bangalore or one of its tech corridors (Whitefield, Koramangala, HSR Layout, …). An unstated or purely remote location is dropped — it cannot be verified |
+| Fresher | Keeps ≤ 1 year of required experience, or a `fresher`/`intern` seniority. A plain title with no stated experience classifies as mid-level and is dropped |
+| Startup | Rejects IT-services majors, global captives, banks, the Big Four and staffing agencies outright, then requires the ad to describe itself in startup terms — *early-stage*, *Series A*, *founding team*, *YC-backed*, *bootstrapped*, … |
+
+Each stage counts its rejections under its own reason (`outside_target_city`,
+`not_fresher`, `not_startup`), so the run log shows exactly where the funnel
+narrowed:
+
+```
+Profile bangalore-fresher-startups: kept 1 of 22 ({'not_startup': 18, 'not_fresher': 2, 'outside_target_city': 1})
+```
+
+Two consequences worth knowing:
+
+* **The startup test is precision-first.** Neither board exposes company size or
+  funding stage, so "startup" is inferred from the company name and the ad's own
+  words. A real startup whose ad never says so is dropped. The alternative —
+  keeping everything not on the blocklist — readmits every mid-size services
+  company the list happens not to name, which is most of them. Both lists live in
+  `app/startups.py` and are meant to be edited.
+* **A profile run skips housekeeping.** It visited one city and a fraction of the
+  catalogue, so ageing out postings it never looked for would wrongly deactivate
+  live jobs — the same reason a cancelled run skips it.
+
+Adding a profile is one entry in `PROFILES` in `app/profiles.py`; the API, both
+UIs and the CLI pick it up with no further changes.
 
 ---
 
@@ -256,7 +314,7 @@ single-instance service.
 
 ```bash
 python main.py serve [--port 8000] [--reload]
-python main.py scrape [--sources naukri linkedin] [--limit N]
+python main.py scrape [--sources naukri linkedin] [--limit N] [--profile KEY]
 python main.py stats
 python main.py export output/jobs.jsonl
 python main.py import output/jobs.jsonl    # backfill from the pre-2.0 format
@@ -312,6 +370,8 @@ app/
 ├── schemas.py        request/response contract
 ├── repository.py     all SQL: filters, pagination, upsert, facets
 ├── pipeline.py       scrape orchestration
+├── profiles.py       targeted scrapes: city + fresher + startup presets
+├── startups.py       startup vs enterprise heuristic
 ├── enrich.py         RawJob -> stored row, quality filters
 ├── taxonomy.py       skills, categories, role detection, query catalogue
 ├── events.py         per-run pub/sub for SSE

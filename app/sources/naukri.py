@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.http_client import HttpClient
-from app.sources.base import JobSource, RawJob
+from app.sources.base import JobSource, RawJob, SearchScope
 from app.sources.browser import BrowserRenderer
 from app.utils import (
     absolute_url,
@@ -61,9 +61,15 @@ def slugify(query: str) -> str:
     return _SLUG_RE.sub("-", query.lower()).strip("-")
 
 
-def search_url(query: str, page: int) -> str:
-    """Naukri paginates by URL suffix: `/python-developer-jobs-2`."""
+def seo_key(query: str, location_slug: str = "") -> str:
+    """Naukri's slug for a search: `python-developer-jobs-in-bangalore`."""
     slug = f"{slugify(query)}-jobs"
+    return f"{slug}-in-{slugify(location_slug)}" if location_slug else slug
+
+
+def search_url(query: str, page: int, location_slug: str = "") -> str:
+    """Naukri paginates by URL suffix: `/python-developer-jobs-2`."""
+    slug = seo_key(query, location_slug)
     return f"{BASE}/{slug}" if page <= 1 else f"{BASE}/{slug}-{page}"
 
 
@@ -71,8 +77,9 @@ class NaukriSource(JobSource):
     name = "naukri"
 
     def __init__(self, client: HttpClient, progress=None,
-                 renderer: BrowserRenderer | None = None) -> None:
-        super().__init__(client, progress)
+                 renderer: BrowserRenderer | None = None,
+                 scope: SearchScope | None = None) -> None:
+        super().__init__(client, progress, scope)
         self.renderer = renderer
         self.pages = max(1, settings.naukri_pages)
         self.page_size = max(20, min(settings.naukri_page_size, 100))
@@ -144,17 +151,21 @@ class NaukriSource(JobSource):
 
     # -------------------------------------------------------------- fast path
     def _api_params(self, query: str, page: int) -> dict:
-        return {
+        city = self.scope.naukri_location_slug
+        params = {
             "noOfResults": self.page_size,
-            "urlType": "search_by_keyword",
+            "urlType": "search_by_key_loc" if city else "search_by_keyword",
             "searchType": "adv",
             "keyword": query,
             "pageNo": page,
             "k": query,
-            "seoKey": f"{slugify(query)}-jobs",
+            "seoKey": seo_key(query, city),
             "src": "jobsearchDesk",
             "sort": "f",  # freshness
         }
+        if city:
+            params["location"] = city
+        return params
 
     async def _fetch_api_page(self, query: str, page: int) -> list[RawJob]:
         payload = await self.client.get_json(
@@ -163,7 +174,7 @@ class NaukriSource(JobSource):
             headers={
                 **API_HEADERS,
                 "User-Agent": self.client.random_user_agent(),
-                "Referer": search_url(query, 1),
+                "Referer": search_url(query, 1, self.scope.naukri_location_slug),
             },
         )
         if not isinstance(payload, dict):
@@ -215,7 +226,9 @@ class NaukriSource(JobSource):
         if self.renderer is None or not self.renderer.enabled:
             return []
         html = await self.renderer.render(
-            search_url(query, page), wait_for=CARD_SELECTOR, scrolls=3
+            search_url(query, page, self.scope.naukri_location_slug),
+            wait_for=CARD_SELECTOR,
+            scrolls=3,
         )
         if not html:
             return []

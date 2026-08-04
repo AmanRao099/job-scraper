@@ -32,6 +32,7 @@ from app.pipeline import (
     request_cancel,
     trigger_scrape,
 )
+from app.profiles import PROFILES
 from app.schemas import (
     FiltersOut,
     HealthOut,
@@ -40,6 +41,7 @@ from app.schemas import (
     JobPage,
     MessageOut,
     PageMeta,
+    ScrapeProfileOut,
     ScrapeRequest,
     ScrapeRunOut,
     ScrapeStarted,
@@ -179,6 +181,7 @@ async def meta() -> dict:
         "work_modes": ["onsite", "hybrid", "remote"],
         "known_skills": sorted(SKILLS),
         "search_queries": SEARCH_QUERIES,
+        "scrape_profiles": [profile.as_dict() for profile in PROFILES.values()],
         "scheduler": {
             "enabled": settings.scheduler_enabled,
             "running": sched.is_running(),
@@ -317,6 +320,15 @@ async def get_stats(session: AsyncSession = Depends(get_session)) -> StatsOut:
 # Scraping
 # ---------------------------------------------------------------------------
 
+@app.get("/scrape/profiles", response_model=list[ScrapeProfileOut], tags=["scrape"])
+async def list_profiles() -> list[ScrapeProfileOut]:
+    """Targeted scrapes: a saved bundle of search terms, city and post-filters.
+
+    Pass a `key` as `profile` to `POST /scrape/run` to run one.
+    """
+    return [ScrapeProfileOut(**profile.as_dict()) for profile in PROFILES.values()]
+
+
 @app.post(
     "/scrape/run",
     response_model=ScrapeStarted,
@@ -331,6 +343,7 @@ async def start_scrape(payload: ScrapeRequest, request: Request) -> ScrapeStarte
             sources=payload.sources,
             queries=payload.queries,
             query_limit=payload.query_limit,
+            profile=payload.profile,
             trigger="manual",
         )
     except ScrapeAlreadyRunning as exc:

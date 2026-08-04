@@ -14,12 +14,35 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from app.config import settings
 from app.http_client import HttpClient
 
 logger = logging.getLogger(__name__)
 
 # Called by sources to report progress: (queries_done_delta, message)
 ProgressFn = Callable[[int, str], Awaitable[None] | None]
+
+
+@dataclass(frozen=True, slots=True)
+class SearchScope:
+    """Where a run searches.
+
+    Every board spells a city differently - LinkedIn wants a numeric geoId,
+    Naukri wants a URL slug - so the translation lives here rather than in the
+    caller. The default mirrors the global settings, which is what an ordinary
+    nationwide run uses; a scrape profile supplies a narrower one.
+    """
+
+    location: str
+    linkedin_geo_id: str
+    naukri_location_slug: str = ""
+
+    @classmethod
+    def default(cls) -> "SearchScope":
+        return cls(
+            location=settings.location,
+            linkedin_geo_id=settings.linkedin_geo_id,
+        )
 
 
 @dataclass(slots=True)
@@ -48,9 +71,15 @@ class JobSource(abc.ABC):
 
     name: str = "base"
 
-    def __init__(self, client: HttpClient, progress: ProgressFn | None = None) -> None:
+    def __init__(
+        self,
+        client: HttpClient,
+        progress: ProgressFn | None = None,
+        scope: SearchScope | None = None,
+    ) -> None:
         self.client = client
         self._progress = progress
+        self.scope = scope or SearchScope.default()
         self._cancel_event: asyncio.Event | None = None
 
     def bind(

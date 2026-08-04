@@ -4,6 +4,7 @@
     python main.py serve                 # run the API (what production runs)
     python main.py scrape                # one-off scrape into the database
     python main.py scrape --limit 5      # smoke test with 5 search queries
+    python main.py scrape --profile bangalore-fresher-startups   # targeted run
     python main.py export jobs.jsonl     # dump the database
     python main.py import output/jobs.jsonl   # backfill from the old format
     python main.py stats                 # quick counts
@@ -48,7 +49,14 @@ async def _scrape(args: argparse.Namespace) -> int:
     from app.db import init_db, session_scope
     from app.events import broker
     from app.pipeline import ScrapeAlreadyRunning, run_scrape, resolve_sources, start_run
+    from app.profiles import resolve_profile
     from app.repository import reap_orphaned_runs
+
+    try:
+        profile = resolve_profile(args.profile)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
     await init_db()
 
@@ -61,7 +69,7 @@ async def _scrape(args: argparse.Namespace) -> int:
 
     sources = resolve_sources(args.sources)
     try:
-        run_id = await start_run(sources, trigger="cli")
+        run_id = await start_run(sources, trigger="cli", profile=profile)
     except ScrapeAlreadyRunning as exc:
         print(
             f"{exc}\n"
@@ -84,7 +92,9 @@ async def _scrape(args: argparse.Namespace) -> int:
                 return
 
     printer = asyncio.create_task(drain())
-    stats = await run_scrape(run_id=run_id, sources=sources, query_limit=args.limit)
+    stats = await run_scrape(
+        run_id=run_id, sources=sources, query_limit=args.limit, profile=profile
+    )
     await asyncio.wait_for(printer, timeout=5)
 
     print("\n" + json.dumps(stats.as_dict(), indent=2))
@@ -319,6 +329,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--sources", nargs="*", default=None, help="e.g. --sources naukri linkedin"
     )
     scrape.add_argument("--limit", type=int, default=None, help="Cap number of search queries")
+    scrape.add_argument(
+        "--profile",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Run a targeted profile instead of the nationwide sweep, e.g. "
+            "--profile bangalore-fresher-startups"
+        ),
+    )
     scrape.add_argument(
         "--stale-after",
         type=int,
