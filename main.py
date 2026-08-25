@@ -5,6 +5,7 @@
     python main.py scrape                # one-off scrape into the database
     python main.py scrape --limit 5      # smoke test with 5 search queries
     python main.py scrape --profile bangalore-fresher-startups   # targeted run
+    python main.py scrape --profile worldwide-masters-tech       # international Masters roles
     python main.py export jobs.jsonl     # dump the database
     python main.py import output/jobs.jsonl   # backfill from the old format
     python main.py stats                 # quick counts
@@ -67,7 +68,7 @@ async def _scrape(args: argparse.Namespace) -> int:
     if reaped:
         logger.warning("Cleared %s interrupted run(s)", reaped)
 
-    sources = resolve_sources(args.sources)
+    sources = resolve_sources(args.sources, profile)
     try:
         run_id = await start_run(sources, trigger="cli", profile=profile)
     except ScrapeAlreadyRunning as exc:
@@ -98,7 +99,9 @@ async def _scrape(args: argparse.Namespace) -> int:
     await asyncio.wait_for(printer, timeout=5)
 
     print("\n" + json.dumps(stats.as_dict(), indent=2))
-    return 0 if stats.jobs_kept or stats.jobs_updated else 1
+    if stats.outcome in {"failed", "cancelled"}:
+        return 1
+    return 0 if stats.jobs_kept or stats.jobs_updated or stats.jobs_unchanged else 1
 
 
 async def _export(args: argparse.Namespace) -> int:
@@ -128,6 +131,14 @@ async def _export(args: argparse.Namespace) -> int:
                     "category": job.category,
                     "seniority": job.seniority,
                     "work_mode": job.work_mode,
+                    "degree_requirements": job.degree_requirements,
+                    "masters_match": job.masters_match,
+                    "education_requirement": job.education_requirement,
+                    "country": job.country,
+                    "is_abroad": job.is_abroad,
+                    "visa_sponsorship": job.visa_sponsorship,
+                    "work_authorization_required": job.work_authorization_required,
+                    "relocation_support": job.relocation_support,
                     "source": job.source,
                     "posted_at": job.posted_at.isoformat() if job.posted_at else None,
                     "scraped_at": job.first_seen_at.isoformat(),
@@ -194,90 +205,39 @@ async def _import(args: argparse.Namespace) -> int:
 
 
 async def _reindex(args: argparse.Namespace) -> int:
-    """Re-apply the current taxonomy and search format to every stored job.
-
-    Classification happens at scrape time, so a posting keeps whatever the rules
-    said on the day it was collected. When those rules are corrected, existing
-    rows stay wrong until the posting happens to be scraped again - and a row
-    that no longer qualifies as a tech job never will be, so it would linger
-    until it aged out weeks later.
-
-    Everything here is derived from columns we already store, so it is safe to
-    re-run and needs no network access.
-    """
-    from sqlalchemy import select
-
-    from app.db import init_db, session_scope
-    from app.models import Job
     from app.config import settings
-    from app.taxonomy import (
-        categorize,
-        detect_seniority,
-        detect_work_mode,
-        is_tech_job,
-        resolve_experience,
-        secondary_categories,
-    )
+    from app.db import init_db
+    from app.reindex import ReindexStats, reindex_jobs
 
     await init_db()
+    batch_size = getattr(args, "batch_size", None) or settings.reindex_batch_size
 
-    scanned = reblobbed = recategorised = retired = re_experienced = 0
-    async with session_scope() as session:
-        rows = (await session.execute(select(Job))).scalars().all()
-        for job in rows:
-            scanned += 1
-            skills = list(job.skills or [])
-
-            # Re-derive experience before anything else - it decides whether the
-            # posting belongs here at all. Rows collected before the description
-            # was consulted carry no experience, and a row with no experience
-            # satisfies every max_experience filter, so a ten-year role sits in
-            # a fresher search until this runs.
-            exp_min, exp_max = resolve_experience(
-                job.experience_text, job.title, job.description
+    def report_progress(stats: ReindexStats) -> None:
+        if getattr(args, "verbose", False):
+            print(
+                f"  ... scanned={stats.scanned} changed={stats.changed} "
+                f"unchanged={stats.unchanged} failed={stats.failed} "
+                f"last_id={stats.last_id}",
+                flush=True,
             )
-            if (exp_min, exp_max) != (job.experience_min, job.experience_max):
-                job.experience_min, job.experience_max = exp_min, exp_max
-                re_experienced += 1
 
-            too_senior = exp_min is not None and exp_min > settings.max_experience_years
-
-            # A row that no longer passes the tech filter, or that turns out to
-            # demand more experience than this tool targets, was admitted by a
-            # rule that has since been corrected. Deactivate rather than delete:
-            # the purge job removes it later, and the row stays inspectable.
-            if job.is_active and (
-                too_senior or not is_tech_job(job.title, job.description, skills)
-            ):
-                job.is_active = False
-                retired += 1
-
-            category = categorize(job.title, job.description, skills)
-            categories = secondary_categories(job.title, job.description, skills)
-            seniority = detect_seniority(job.title, job.experience_text, exp_min)
-            work_mode = detect_work_mode(job.location, job.title, job.description)
-
-            if (category, seniority, work_mode) != (job.category, job.seniority, job.work_mode):
-                recategorised += 1
-            job.category = category
-            job.categories = categories
-            job.seniority = seniority
-            job.work_mode = work_mode
-
-            rebuilt = job.build_search_blob()
-            if rebuilt != job.search_blob:
-                job.search_blob = rebuilt
-                reblobbed += 1
-
-            if args.verbose and scanned % 500 == 0:
-                print(f"  ... {scanned} scanned", flush=True)
-
-    print(
-        f"Reindexed {scanned} jobs: {reblobbed} search blobs rebuilt, "
-        f"{recategorised} reclassified, {re_experienced} experience re-resolved, "
-        f"{retired} retired as non-tech or too senior."
+    stats = await reindex_jobs(
+        batch_size=batch_size,
+        start_after_id=getattr(args, "start_after_id", 0),
+        dry_run=getattr(args, "dry_run", False),
+        progress=report_progress,
     )
-    return 0
+    print(
+        json.dumps(
+            {
+                "dry_run": getattr(args, "dry_run", False),
+                "batch_size": batch_size,
+                **stats.as_dict(),
+            },
+            indent=2,
+        )
+    )
+    return 1 if stats.failed else 0
 
 
 async def _stats(_: argparse.Namespace) -> int:
@@ -335,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY",
         help=(
             "Run a targeted profile instead of the nationwide sweep, e.g. "
-            "--profile bangalore-fresher-startups"
+            "--profile bangalore-fresher-startups or worldwide-masters-tech"
         ),
     )
     scrape.add_argument(
@@ -356,8 +316,11 @@ def build_parser() -> argparse.ArgumentParser:
     importer.set_defaults(func=_import, is_async=True)
 
     reindex = sub.add_parser(
-        "reindex", help="Rebuild the search index for every stored job"
+        "reindex", help="Recompute stored classifications without network access"
     )
+    reindex.add_argument("--batch-size", type=int, default=None)
+    reindex.add_argument("--start-after-id", type=int, default=0)
+    reindex.add_argument("--dry-run", action="store_true")
     reindex.add_argument("--verbose", action="store_true")
     reindex.set_defaults(func=_reindex, is_async=True)
 

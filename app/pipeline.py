@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import traceback
 from dataclasses import dataclass, field
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db import session_scope
@@ -102,33 +102,57 @@ def is_cancelled(run_id: int) -> bool:
     return event is not None and event.is_set()
 
 
+async def shutdown_runs(timeout: float | None = None) -> None:
+    """Cooperatively drain active scrapes before database connections close."""
+    tasks = [task for task in _run_tasks.values() if not task.done()]
+    if not tasks:
+        return
+    for event in _cancel_events.values():
+        event.set()
+    done, pending = await asyncio.wait(
+        tasks,
+        timeout=timeout if timeout is not None else settings.shutdown_grace_seconds,
+    )
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    logger.info("Shutdown drained %s scrape task(s); forced=%s", len(done), len(pending))
+
+
 @dataclass(slots=True)
 class ScrapeStats:
+    outcome: str = "running"
     jobs_seen: int = 0
     jobs_kept: int = 0
     jobs_new: int = 0
     jobs_updated: int = 0
+    jobs_unchanged: int = 0
     jobs_rejected: int = 0
     deactivated: int = 0
     purged: int = 0
     cancelled: bool = False
     profile: str | None = None
     per_source: dict[str, int] = field(default_factory=dict)
+    source_details: dict[str, dict[str, object]] = field(default_factory=dict)
     rejections: dict[str, int] = field(default_factory=dict)
     duration_seconds: float = 0.0
 
     def as_dict(self) -> dict:
         return {
+            "outcome": self.outcome,
             "profile": self.profile,
             "jobs_seen": self.jobs_seen,
             "jobs_kept": self.jobs_kept,
             "jobs_new": self.jobs_new,
             "jobs_updated": self.jobs_updated,
+            "jobs_unchanged": self.jobs_unchanged,
             "jobs_rejected": self.jobs_rejected,
             "deactivated": self.deactivated,
             "purged": self.purged,
             "cancelled": self.cancelled,
             "per_source": self.per_source,
+            "source_details": self.source_details,
             "rejections": self.rejections,
             "duration_seconds": self.duration_seconds,
         }
@@ -138,8 +162,13 @@ class ScrapeAlreadyRunning(RuntimeError):
     pass
 
 
-def resolve_sources(requested: list[str] | None) -> list[str]:
+def resolve_sources(
+    requested: list[str] | None, profile: ScrapeProfile | None = None
+) -> list[str]:
     wanted = [s.lower() for s in (requested or settings.sources_enabled)]
+    if profile is not None and profile.allowed_sources:
+        allowed = set(profile.allowed_sources)
+        wanted = [source for source in wanted if source in allowed]
     valid = [s for s in wanted if s in SOURCE_REGISTRY]
     if not valid:
         raise ValueError(
@@ -165,17 +194,26 @@ async def start_run(
     sources: list[str], trigger: str, profile: ScrapeProfile | None = None
 ) -> int:
     """Create the run row up front so the caller gets an id to poll immediately."""
-    async with session_scope() as session:
-        active = await has_running_scrape(session)
-        if active is not None:
-            raise ScrapeAlreadyRunning(f"Scrape run {active.id} is already in progress")
-        run = await create_run(
-            session,
-            sources,
-            trigger,
-            stats={"profile": profile.key} if profile else None,
-        )
-        return run.id
+    try:
+        async with session_scope() as session:
+            active = await has_running_scrape(session)
+            if active is not None:
+                raise ScrapeAlreadyRunning(
+                    f"Scrape run {active.id} is already in progress"
+                )
+            run = await create_run(
+                session,
+                sources,
+                trigger,
+                stats={"profile": profile.key} if profile else None,
+            )
+            return run.id
+    except IntegrityError as exc:
+        # The partial unique index closes the check-then-insert race across API,
+        # CLI and scheduled scraper processes.
+        raise ScrapeAlreadyRunning(
+            "Another scrape acquired the database run lock"
+        ) from exc
 
 
 async def run_scrape(
@@ -197,7 +235,7 @@ async def run_scrape(
         try:
             active_profile = resolve_profile(profile)
             stats.profile = active_profile.key if active_profile else None
-            source_names = resolve_sources(sources)
+            source_names = resolve_sources(sources, active_profile)
             query_list = resolve_queries(queries, query_limit, active_profile)
             scope = active_profile.scope if active_profile else SearchScope.default()
 
@@ -212,12 +250,28 @@ async def run_scrape(
                 ),
             )
 
-            raw_jobs, per_source = await _collect(
-                run_id, source_names, query_list, cancel_event, scope
+            raw_jobs, per_source, source_details = await _collect(
+                run_id, source_names, query_list, cancel_event, scope, active_profile
             )
             stats.per_source = per_source
+            stats.source_details = source_details
             stats.jobs_seen = len(raw_jobs)
             stats.cancelled = cancel_event.is_set()
+
+            failed_sources = [
+                name
+                for name, detail in source_details.items()
+                if detail.get("errors")
+            ]
+            accepted_responses = sum(
+                int(detail.get("responses_accepted", 0))
+                for detail in source_details.values()
+            )
+            if not raw_jobs and failed_sources and not accepted_responses:
+                raise RuntimeError(
+                    "All enabled sources failed before returning a valid response: "
+                    + ", ".join(failed_sources)
+                )
 
             if stats.cancelled:
                 await broker.log(
@@ -230,7 +284,17 @@ async def run_scrape(
                 await broker.log(run_id, f"Collected {len(raw_jobs)} raw postings")
 
             # Enrichment is CPU-bound regex work; keep it off the event loop.
-            normalized, rejections = await asyncio.to_thread(normalize_many, raw_jobs)
+            normalized, rejections = await asyncio.to_thread(
+                normalize_many,
+                raw_jobs,
+                allow_any_experience=bool(
+                    active_profile and active_profile.allow_any_experience
+                ),
+                profile_key=active_profile.key if active_profile else None,
+                max_posting_age_days=(
+                    active_profile.freshness_days if active_profile else None
+                ),
+            )
 
             if active_profile is not None:
                 before = len(normalized)
@@ -254,15 +318,18 @@ async def run_scrape(
             upsert = await _persist(normalized)
             stats.jobs_new = upsert.created
             stats.jobs_updated = upsert.updated
+            stats.jobs_unchanged = upsert.unchanged
             await broker.log(
-                run_id, f"Saved {upsert.created} new, refreshed {upsert.updated} existing"
+                run_id,
+                f"Saved {upsert.created} new, updated {upsert.updated}, "
+                f"unchanged {upsert.unchanged}",
             )
 
             # A partial run must not age out postings it simply never reached.
             # A profile run is partial by construction - it visited one city and
             # a fraction of the query catalogue - so it skips housekeeping for
             # exactly the same reason a cancelled run does.
-            if not stats.cancelled and active_profile is None:
+            if not stats.cancelled and not failed_sources and active_profile is None:
                 stats.deactivated, stats.purged = await _housekeeping()
                 if stats.deactivated or stats.purged:
                     await broker.log(
@@ -274,7 +341,14 @@ async def run_scrape(
             stats.duration_seconds = round(loop.time() - started, 2)
             facet_cache.clear()
 
-            status = "cancelled" if stats.cancelled else "completed"
+            status = (
+                "cancelled"
+                if stats.cancelled
+                else "partial"
+                if failed_sources
+                else "completed"
+            )
+            stats.outcome = status
             async with session_scope() as session:
                 await finish_run(session, run_id, status=status, stats=stats.as_dict())
 
@@ -285,6 +359,7 @@ async def run_scrape(
             # Hard cancel: the cooperative path did not wind down in time.
             stats.duration_seconds = round(loop.time() - started, 2)
             stats.cancelled = True
+            stats.outcome = "cancelled"
             logger.warning("Scrape run %s was cancelled outright", run_id)
 
             async with session_scope() as session:
@@ -302,7 +377,8 @@ async def run_scrape(
 
         except Exception as exc:
             stats.duration_seconds = round(loop.time() - started, 2)
-            detail = f"{type(exc).__name__}: {exc}"
+            stats.outcome = "failed"
+            detail = f"{type(exc).__name__}: scrape run failed; see server logs"
             logger.exception("Scrape run %s failed", run_id)
 
             async with session_scope() as session:
@@ -311,7 +387,7 @@ async def run_scrape(
                     run_id,
                     status="failed",
                     stats=stats.as_dict(),
-                    error=f"{detail}\n{traceback.format_exc()}",
+                    error=detail,
                 )
 
             await broker.log(run_id, f"Run failed: {detail}", level="error")
@@ -335,7 +411,8 @@ async def _collect(
     queries: list[str],
     cancel_event: asyncio.Event,
     scope: SearchScope | None = None,
-) -> tuple[list, dict[str, int]]:
+    profile: ScrapeProfile | None = None,
+) -> tuple[list, dict[str, int], dict[str, dict[str, object]]]:
     done = 0
     total = 0
     progress_lock = asyncio.Lock()
@@ -345,6 +422,11 @@ async def _collect(
             SOURCE_REGISTRY[name](client, None, renderer=renderer, scope=scope)
             for name in source_names
         ]
+        if profile is not None:
+            page_limits = dict(profile.max_pages_by_source)
+            for source in sources:
+                if source.name in page_limits and hasattr(source, "pages"):
+                    source.pages = min(source.pages, page_limits[source.name])
         total = sum(source.plan(queries) for source in sources)
 
         async with session_scope() as session:
@@ -376,16 +458,24 @@ async def _collect(
 
     raw_jobs: list = []
     per_source: dict[str, int] = {}
+    source_details: dict[str, dict[str, object]] = {}
     for source, result in zip(sources, results):
         if isinstance(result, BaseException):
             logger.warning("Source %s failed entirely: %s", source.name, result)
             await broker.log(run_id, f"Source {source.name} failed: {result}", level="error")
             per_source[source.name] = 0
+            source.stats.fail("source_exception")
+            source.finish_stats(0)
+            source_details[source.name] = source.stats.as_dict()
             continue
         per_source[source.name] = len(result)
+        if profile is not None and profile.max_results is not None:
+            result = result[: profile.max_results]
+            per_source[source.name] = len(result)
+        source_details[source.name] = source.stats.as_dict()
         raw_jobs.extend(result)
 
-    return raw_jobs, per_source
+    return raw_jobs, per_source, source_details
 
 
 async def _save_progress(run_id: int, done: int) -> None:
@@ -412,6 +502,7 @@ async def _persist(normalized: list) -> UpsertResult:
             result = await upsert_jobs(session, chunk)
         total.created += result.created
         total.updated += result.updated
+        total.unchanged += result.unchanged
     return total
 
 
@@ -431,10 +522,10 @@ async def trigger_scrape(
     trigger: str = "manual",
 ) -> int:
     """Create a run and kick it off in the background. Returns the run id."""
-    source_names = resolve_sources(sources)
     # Resolve here as well as in run_scrape: an unknown profile must fail the
     # caller's request rather than a background task nobody is watching.
     active_profile = resolve_profile(profile)
+    source_names = resolve_sources(sources, active_profile)
     run_id = await start_run(source_names, trigger, active_profile)
 
     # Register before scheduling so a cancel arriving immediately still lands.

@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -58,6 +59,42 @@ def make_fingerprint(title: str, company: str, location: str = "") -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def make_identity_fingerprint(
+    source: str,
+    external_id: str | None,
+    canonical_url: str,
+    dedup_key: str,
+) -> str:
+    """Prefer provider identity over the deliberately fuzzy cross-board key."""
+    if external_id:
+        raw = f"source:{source.strip().lower()}:{external_id.strip().lower()}"
+    elif canonical_url:
+        raw = f"url:{canonical_url.strip().lower()}"
+    else:
+        raw = f"composite:{dedup_key}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def build_search_blob(
+    title: str,
+    company: str,
+    location: str,
+    category: str,
+    country: str | None,
+    skills: list | None,
+) -> str:
+    """Build the portable lowercase search document from explicit values."""
+    parts = [
+        title or "",
+        company or "",
+        location or "",
+        category or "",
+        country or "",
+        skills_fence(skills),
+    ]
+    return " ".join(part for part in parts if part).lower()
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
@@ -68,6 +105,12 @@ class Job(Base):
     source: Mapped[str] = mapped_column(String(32), index=True)
     external_id: Mapped[str | None] = mapped_column(String(128), index=True)
     apply_link: Mapped[str] = mapped_column(Text)
+    canonical_url: Mapped[str] = mapped_column(Text, default="", index=True)
+    dedup_key: Mapped[str] = mapped_column(String(40), default="", index=True)
+    source_ids: Mapped[list] = mapped_column(JSON, default=list)
+    source_urls: Mapped[list] = mapped_column(JSON, default=list)
+    discovered_profiles: Mapped[list] = mapped_column(JSON, default=list)
+    discovered_queries: Mapped[list] = mapped_column(JSON, default=list)
 
     # core fields
     title: Mapped[str] = mapped_column(String(300), index=True)
@@ -91,6 +134,23 @@ class Job(Base):
     categories: Mapped[list] = mapped_column(JSON, default=list)
     seniority: Mapped[str] = mapped_column(String(24), index=True, default="mid")
     work_mode: Mapped[str] = mapped_column(String(16), index=True, default="onsite")
+    employment_type: Mapped[str] = mapped_column(String(16), index=True, default="unknown")
+    degree_requirements: Mapped[list] = mapped_column(JSON, default=list)
+    masters_match: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    education_requirement: Mapped[str] = mapped_column(
+        String(16), default="not_stated", index=True
+    )
+    country: Mapped[str | None] = mapped_column(String(128), index=True)
+    is_abroad: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    visa_sponsorship: Mapped[str] = mapped_column(
+        String(16), default="unknown", index=True
+    )
+    work_authorization_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True
+    )
+    relocation_support: Mapped[str] = mapped_column(
+        String(16), default="unknown", index=True
+    )
 
     # lifecycle
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -108,6 +168,15 @@ class Job(Base):
         Index("ix_jobs_active_posted", "is_active", "posted_at"),
         Index("ix_jobs_category_active", "category", "is_active"),
         Index("ix_jobs_source_active", "source", "is_active"),
+        Index("ix_jobs_source_external", "source", "external_id"),
+        Index(
+            "ix_jobs_international_masters_education_posted",
+            "is_active",
+            "is_abroad",
+            "masters_match",
+            "education_requirement",
+            "posted_at",
+        ),
     )
 
     def build_search_blob(self) -> str:
@@ -119,14 +188,14 @@ class Job(Base):
         '%|java|%' and get only real Java roles, while free-text search still
         works over the whole string.
         """
-        parts = [
-            self.title or "",
-            self.company or "",
-            self.location or "",
-            self.category or "",
-            skills_fence(self.skills),
-        ]
-        return " ".join(part for part in parts if part).lower()
+        return build_search_blob(
+            self.title,
+            self.company,
+            self.location,
+            self.category,
+            self.country,
+            self.skills,
+        )
 
 
 class ScrapeRun(Base):
@@ -151,6 +220,16 @@ class ScrapeRun(Base):
 
     stats: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index(
+            "ux_scrape_runs_single_running",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
+    )
 
     @property
     def progress(self) -> float:

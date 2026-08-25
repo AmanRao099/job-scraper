@@ -3,12 +3,15 @@
 import pytest
 
 from app.enrich import normalize
-from app.pipeline import resolve_queries
+from app.pipeline import resolve_queries, resolve_sources
 from app.profiles import (
     BANGALORE_FRESHER_STARTUPS,
     REJECT_NOT_FRESHER,
     REJECT_NOT_STARTUP,
     REJECT_OFF_LOCATION,
+    REJECT_NOT_ABROAD,
+    REJECT_NO_MASTERS,
+    WORLDWIDE_MASTERS_TECH,
     get_profile,
     resolve_profile,
 )
@@ -178,6 +181,75 @@ class TestProfileWiring:
         scope = PROFILE.scope
         assert scope.naukri_location_slug == "bangalore"
         assert scope.linkedin_geo_id != SearchScope.default().linkedin_geo_id
+
+
+class TestWorldwideMastersProfile:
+    def make_worldwide_job(self, **overrides):
+        defaults = dict(
+            source="linkedin",
+            title="Senior Machine Learning Engineer",
+            company="Global AI Labs",
+            apply_link="https://www.linkedin.com/jobs/view/123",
+            location="Berlin, Germany",
+            experience_text="8+ years",
+            description=(
+                "Build production ML systems with Python and PyTorch. "
+                "A Masters degree in Computer Science is preferred."
+            ),
+            declared_skills=["Python", "PyTorch"],
+        )
+        defaults.update(overrides)
+        job, reason = normalize(RawJob(**defaults), allow_any_experience=True)
+        assert reason is None, f"enrichment rejected fixture: {reason}"
+        return job
+
+    def test_retains_senior_international_job(self):
+        job = self.make_worldwide_job()
+        assert job.experience_min == 8
+        assert WORLDWIDE_MASTERS_TECH.reject_reason(job) is None
+
+    def test_ordinary_normalization_still_rejects_senior_job(self):
+        raw = RawJob(
+            source="linkedin",
+            title="Senior Machine Learning Engineer",
+            company="Global AI Labs",
+            apply_link="https://www.linkedin.com/jobs/view/123",
+            location="Berlin, Germany",
+            experience_text="8+ years",
+            description="Python and PyTorch. Masters degree required.",
+        )
+        _, reason = normalize(raw)
+        assert reason == "experience_too_high"
+
+    def test_rejects_search_hit_without_description_evidence(self):
+        job = self.make_worldwide_job(description="Build Python cloud systems.")
+        assert WORLDWIDE_MASTERS_TECH.reject_reason(job) == REJECT_NO_MASTERS
+
+    def test_rejects_india_based_job(self):
+        job = self.make_worldwide_job(location="Hyderabad, Telangana")
+        assert WORLDWIDE_MASTERS_TECH.reject_reason(job) == REJECT_NOT_ABROAD
+
+    def test_non_technical_masters_job_never_reaches_profile(self):
+        raw = RawJob(
+            source="linkedin",
+            title="Marketing Director",
+            company="Global Retail",
+            apply_link="https://www.linkedin.com/jobs/view/456",
+            location="London, United Kingdom",
+            description="Masters degree required. Lead brand marketing campaigns.",
+        )
+        _, reason = normalize(raw, allow_any_experience=True)
+        assert reason == "not_tech"
+
+    def test_default_sources_are_international_capable(self):
+        assert resolve_sources(None, WORLDWIDE_MASTERS_TECH) == ["linkedin"]
+
+    def test_naukri_cannot_be_forced_into_worldwide_profile(self):
+        with pytest.raises(ValueError):
+            resolve_sources(["naukri"], WORLDWIDE_MASTERS_TECH)
+
+    def test_linkedin_scope_includes_all_experience_levels(self):
+        assert WORLDWIDE_MASTERS_TECH.scope.linkedin_experience_filter == ""
 
 
 class TestNaukriUrls:

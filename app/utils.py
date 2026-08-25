@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -48,10 +49,24 @@ def absolute_url(href: str | None, base: str) -> str:
 
 
 def strip_tracking(url: str) -> str:
-    """Drop query strings from job links - they carry per-session tracking."""
+    """Remove known tracking parameters while preserving functional query data."""
     if not url:
         return ""
-    return url.split("?", 1)[0]
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return ""
+    tracking_names = {
+        "trk", "trackingid", "refid", "ref_id", "lipi", "midtoken",
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "gclid", "fbclid", "mc_cid", "mc_eid",
+    }
+    query = urlencode(
+        [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+         if key.lower() not in tracking_names],
+        doseq=True,
+    )
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", query, ""))
 
 
 def from_epoch_ms(value: object) -> datetime | None:

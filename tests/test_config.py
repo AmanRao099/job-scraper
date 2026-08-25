@@ -71,6 +71,11 @@ def test_cors_origins_accept_comma_separated_values(monkeypatch):
     assert Settings().cors_origins == ["https://a.vercel.app", "https://b.vercel.app"]
 
 
+def test_cors_origin_regex_is_anchored(monkeypatch):
+    monkeypatch.setenv("CORS_ORIGIN_REGEX", r"https://.*\.example\.com")
+    assert Settings().cors_origin_regex == r"^(?:https://.*\.example\.com)$"
+
+
 def test_direct_postgres_uses_prepared_statement_caching(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://u:p@ep-abc.ap-southeast-1.aws.neon.tech/db")
     settings = Settings()
@@ -105,3 +110,32 @@ def test_sqlite_connect_args_keep_the_busy_timeout(monkeypatch):
 
     assert settings.is_sqlite
     assert settings.db_connect_args == {"timeout": 30}
+
+
+def test_production_api_configuration_fails_closed(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ADMIN_TOKEN", "")
+    with pytest.raises(RuntimeError, match="ADMIN_TOKEN"):
+        Settings().validate_api_startup()
+
+
+def test_invalid_request_delay_range_fails_early(monkeypatch):
+    monkeypatch.setenv("REQUEST_DELAY_MIN", "2")
+    monkeypatch.setenv("REQUEST_DELAY_MAX", "1")
+    with pytest.raises(ValueError, match="REQUEST_DELAY_MIN"):
+        Settings()
+
+
+def test_production_postgres_requires_certificate_verification():
+    common = dict(
+        environment="production",
+        database_url="postgresql://u:p@db.example/prod",
+        admin_token="x" * 32,
+        cors_origins=["https://app.example"],
+        allowed_hosts=["api.example"],
+    )
+    with pytest.raises(RuntimeError, match="verify-full"):
+        Settings(**common).validate_api_startup()
+    secure = Settings(**common, database_ssl_mode="verify-full")
+    secure.validate_api_startup()
+    assert secure.db_connect_args["ssl"] == "verify-full"

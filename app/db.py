@@ -12,7 +12,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import event, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -75,12 +75,100 @@ if settings.is_sqlite:
 
 
 async def init_db() -> None:
-    """Create tables if they do not exist."""
+    """Create tables and add backward-compatible columns to existing jobs."""
     from app import models  # noqa: F401  - register mappers
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database ready at %s", settings.database_url)
+        await conn.run_sync(_migrate_jobs_table)
+        await conn.run_sync(_migrate_scrape_runs_table)
+    logger.info(
+        "Database ready at %s",
+        engine.url.render_as_string(hide_password=True),
+    )
+
+
+# ``create_all`` intentionally does not alter existing tables. These additions
+# are nullable or carry a server default, so both SQLite and PostgreSQL can add
+# them in place without rebuilding the table or losing rows.
+_JOB_COLUMN_ADDITIONS: tuple[tuple[str, str], ...] = (
+    ("canonical_url", "TEXT NOT NULL DEFAULT ''"),
+    ("dedup_key", "VARCHAR(40) NOT NULL DEFAULT ''"),
+    ("source_ids", "JSON NOT NULL DEFAULT '[]'"),
+    ("source_urls", "JSON NOT NULL DEFAULT '[]'"),
+    ("discovered_profiles", "JSON NOT NULL DEFAULT '[]'"),
+    ("discovered_queries", "JSON NOT NULL DEFAULT '[]'"),
+    ("employment_type", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+    ("degree_requirements", "JSON NOT NULL DEFAULT '[]'"),
+    ("masters_match", "BOOLEAN NOT NULL DEFAULT false"),
+    ("education_requirement", "VARCHAR(16) NOT NULL DEFAULT 'not_stated'"),
+    ("country", "VARCHAR(128)"),
+    ("is_abroad", "BOOLEAN NOT NULL DEFAULT false"),
+    ("visa_sponsorship", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+    ("work_authorization_required", "BOOLEAN NOT NULL DEFAULT false"),
+    ("relocation_support", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+)
+
+_JOB_INDEX_ADDITIONS: tuple[tuple[str, str], ...] = (
+    ("ix_jobs_canonical_url", "canonical_url"),
+    ("ix_jobs_dedup_key", "dedup_key"),
+    ("ix_jobs_employment_type", "employment_type"),
+    ("ix_jobs_masters_match", "masters_match"),
+    ("ix_jobs_education_requirement", "education_requirement"),
+    ("ix_jobs_country", "country"),
+    ("ix_jobs_is_abroad", "is_abroad"),
+    ("ix_jobs_visa_sponsorship", "visa_sponsorship"),
+    ("ix_jobs_work_authorization_required", "work_authorization_required"),
+    ("ix_jobs_relocation_support", "relocation_support"),
+)
+
+_JOB_COMPOSITE_INDEX_ADDITIONS: tuple[tuple[str, str], ...] = (
+    ("ix_jobs_source_external", "source, external_id"),
+    (
+        "ix_jobs_international_masters_education_posted",
+        "is_active, is_abroad, masters_match, education_requirement, posted_at",
+    ),
+)
+
+
+def _migrate_jobs_table(sync_conn) -> None:
+    """Apply the small additive schema migration, idempotently."""
+    inspector = inspect(sync_conn)
+    if "jobs" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("jobs")}
+    for name, definition in _JOB_COLUMN_ADDITIONS:
+        if name not in existing:
+            sync_conn.exec_driver_sql(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            logger.info("Added jobs.%s", name)
+    for index_name, column_name in _JOB_INDEX_ADDITIONS:
+        sync_conn.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON jobs ({column_name})"
+        )
+    for index_name, columns in _JOB_COMPOSITE_INDEX_ADDITIONS:
+        sync_conn.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON jobs ({columns})"
+        )
+
+
+def _migrate_scrape_runs_table(sync_conn) -> None:
+    """Enforce one database-wide running scrape, including legacy databases."""
+    inspector = inspect(sync_conn)
+    if "scrape_runs" not in inspector.get_table_names():
+        return
+    # A pre-index deployment could race and leave several rows running. Keep
+    # the newest as the lock owner and retain older rows as failed history.
+    sync_conn.exec_driver_sql(
+        "UPDATE scrape_runs SET status = 'failed', finished_at = CURRENT_TIMESTAMP, "
+        "error = 'Superseded while installing the single-run constraint' "
+        "WHERE status = 'running' AND id <> ("
+        "SELECT newest_id FROM (SELECT MAX(id) AS newest_id FROM scrape_runs "
+        "WHERE status = 'running') AS newest)"
+    )
+    sync_conn.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_scrape_runs_single_running "
+        "ON scrape_runs (status) WHERE status = 'running'"
+    )
 
 
 async def dispose_db() -> None:

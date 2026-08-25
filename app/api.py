@@ -7,8 +7,12 @@ on every keystroke. Write endpoints only ever schedule background work.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import json
 import logging
+import re
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -16,12 +20,19 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repository as repo
 from app import scheduler as sched
+from app.classification import (
+    EDUCATION_REQUIREMENTS,
+    RELOCATION_SUPPORT_VALUES,
+    VISA_SPONSORSHIP_VALUES,
+)
 from app.config import settings
 from app.db import SessionLocal, dispose_db, get_session, healthcheck, init_db
 from app.events import broker
@@ -30,6 +41,7 @@ from app.pipeline import (
     HARD_CANCEL_GRACE_SECONDS,
     ScrapeAlreadyRunning,
     request_cancel,
+    shutdown_runs,
     trigger_scrape,
 )
 from app.profiles import PROFILES
@@ -64,6 +76,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
     )
+    settings.validate_api_startup()
     await init_db()
 
     # Clear runs abandoned by a process that died. Age-limited because this
@@ -89,6 +102,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
     sched.shutdown_scheduler()
+    await shutdown_runs()
     await dispose_db()
 
 
@@ -116,6 +130,33 @@ app.add_middleware(
     # pay for an OPTIONS round-trip each time.
     max_age=600,
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    supplied = request.headers.get("x-request-id", "")
+    request_id = supplied if _REQUEST_ID_RE.fullmatch(supplied) else uuid.uuid4().hex
+    request.state.request_id = request_id
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("request_failed request_id=%s path=%s", request_id, request.url.path)
+        raise
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "request request_id=%s method=%s path=%s status=%s duration_ms=%.1f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        (time.monotonic() - started) * 1000,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +167,9 @@ async def require_admin(x_admin_token: str | None = Header(default=None)) -> Non
     """Protect mutating endpoints when ADMIN_TOKEN is configured."""
     if not settings.admin_token:
         return
-    if x_admin_token != settings.admin_token:
+    if x_admin_token is None or not secrets.compare_digest(
+        x_admin_token, settings.admin_token
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid X-Admin-Token header",
@@ -169,6 +212,20 @@ async def health() -> HealthOut:
     )
 
 
+@app.get("/live", tags=["meta"])
+async def live() -> dict[str, str]:
+    """Process liveness; does not depend on external services."""
+    return {"status": "ok"}
+
+
+@app.get("/ready", response_model=HealthOut, tags=["meta"])
+async def ready() -> HealthOut:
+    result = await health()
+    if not result.database:
+        raise HTTPException(status_code=503, detail="Database is not ready")
+    return result
+
+
 @app.get("/meta", tags=["meta"])
 async def meta() -> dict:
     """Static reference data: what can be scraped and filtered on."""
@@ -179,6 +236,10 @@ async def meta() -> dict:
         "categories": sorted(CATEGORIES),
         "seniorities": SENIORITY_LEVELS,
         "work_modes": ["onsite", "hybrid", "remote"],
+        "employment_types": ["full_time", "part_time", "contract", "temporary", "internship", "unknown"],
+        "education_requirements": list(EDUCATION_REQUIREMENTS),
+        "visa_sponsorship_values": list(VISA_SPONSORSHIP_VALUES),
+        "relocation_support_values": list(RELOCATION_SUPPORT_VALUES),
         "known_skills": sorted(SKILLS),
         "search_queries": SEARCH_QUERIES,
         "scrape_profiles": [profile.as_dict() for profile in PROFILES.values()],
@@ -198,14 +259,22 @@ async def meta() -> dict:
 @app.get("/jobs", response_model=JobPage, tags=["jobs"])
 async def list_jobs(
     session: AsyncSession = Depends(get_session),
-    q: str | None = Query(None, description="Free text over title, company, skills, description"),
+    q: str | None = Query(None, max_length=200, description="Free text over title, company, skills, description"),
     source: list[str] | None = Query(None),
     category: list[str] | None = Query(None),
     skill: list[str] | None = Query(None, description="Repeatable; results must match all"),
     seniority: list[str] | None = Query(None),
     work_mode: list[str] | None = Query(None),
-    location: str | None = Query(None),
-    company: str | None = Query(None),
+    employment_type: list[str] | None = Query(None),
+    country: list[str] | None = Query(None),
+    is_abroad: bool | None = Query(None),
+    masters_match: bool | None = Query(None),
+    education_requirement: list[str] | None = Query(None),
+    visa_sponsorship: list[str] | None = Query(None),
+    relocation_support: list[str] | None = Query(None),
+    work_authorization_required: bool | None = Query(None),
+    location: str | None = Query(None, max_length=200),
+    company: str | None = Query(None, max_length=200),
     min_experience: int | None = Query(None, ge=0, le=30),
     max_experience: int | None = Query(None, ge=0, le=30),
     include_unknown_experience: bool = Query(
@@ -219,9 +288,53 @@ async def list_jobs(
     include_inactive: bool = Query(False),
     sort: str = Query("posted_at", pattern="^(posted_at|first_seen_at|last_seen_at|title|company|experience)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int | None = Query(None, ge=1),
 ) -> JobPage:
+    repeated_filters = {
+        "source": source,
+        "category": category,
+        "skill": skill,
+        "seniority": seniority,
+        "work_mode": work_mode,
+        "employment_type": employment_type,
+        "country": country,
+        "education_requirement": education_requirement,
+        "visa_sponsorship": visa_sponsorship,
+        "relocation_support": relocation_support,
+    }
+    oversized = [name for name, values in repeated_filters.items() if values and len(values) > 25]
+    if oversized:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most 25 values are allowed for: {', '.join(oversized)}",
+        )
+    allowed_values = {
+        "work_mode": {"onsite", "hybrid", "remote"},
+        "employment_type": {
+            "full_time", "part_time", "contract", "temporary", "internship", "unknown"
+        },
+        "education_requirement": set(EDUCATION_REQUIREMENTS),
+        "visa_sponsorship": set(VISA_SPONSORSHIP_VALUES),
+        "relocation_support": set(RELOCATION_SUPPORT_VALUES),
+    }
+    invalid: dict[str, list[str]] = {}
+    for name, allowed in allowed_values.items():
+        values = repeated_filters[name]
+        bad = sorted({value.lower() for value in values or []} - allowed)
+        if bad:
+            invalid[name] = bad
+    if invalid:
+        raise HTTPException(status_code=422, detail={"invalid_filter_values": invalid})
+    if (
+        min_experience is not None
+        and max_experience is not None
+        and min_experience > max_experience
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="min_experience cannot exceed max_experience",
+        )
     size = min(page_size or settings.default_page_size, settings.max_page_size)
 
     filters = repo.JobFilters(
@@ -231,6 +344,14 @@ async def list_jobs(
         skill=skill,
         seniority=seniority,
         work_mode=work_mode,
+        employment_type=employment_type,
+        country=country,
+        is_abroad=is_abroad,
+        masters_match=masters_match,
+        education_requirement=education_requirement,
+        visa_sponsorship=visa_sponsorship,
+        relocation_support=relocation_support,
+        work_authorization_required=work_authorization_required,
         location=location,
         company=company,
         min_experience=min_experience,
@@ -281,6 +402,17 @@ async def get_filters(session: AsyncSession = Depends(get_session)) -> FiltersOu
         locations=await repo.group_counts(session, Job.location, limit=40),
         companies=await repo.group_counts(session, Job.company, limit=40),
         skills=await repo.skill_counts(session, limit=60),
+        countries=await repo.group_counts(session, Job.country, limit=100),
+        education_requirements=await repo.group_counts(
+            session, Job.education_requirement, limit=10
+        ),
+        visa_sponsorships=await repo.group_counts(
+            session, Job.visa_sponsorship, limit=10
+        ),
+        relocation_supports=await repo.group_counts(
+            session, Job.relocation_support, limit=10
+        ),
+        employment_types=await repo.group_counts(session, Job.employment_type, limit=10),
     )
     repo.facet_cache.set("filters", payload)
     return payload

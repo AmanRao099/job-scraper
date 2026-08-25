@@ -57,12 +57,14 @@ machines, and `render.yaml` uses their native Python runtime — a plain
      `https://app.example.com,http://localhost:5173`
    - `CORS_ORIGIN_REGEX` — leave blank unless your frontend's hostname changes
      per deploy (preview builds). Example: `https://.*\.my-app\.vercel\.app`
+   - `ALLOWED_HOSTS` — comma-separated API hostnames, without schemes.
+   - `DATABASE_SSL_MODE` — `verify-full` in production (the blueprint sets it).
 3. After the first deploy, open **Environment** and copy the generated
    `ADMIN_TOKEN` — step 3 needs it.
 4. Check it:
 
    ```bash
-   curl https://<your-service>.onrender.com/health
+   curl https://<your-service>.onrender.com/ready
    # {"status":"ok","database":true,"scheduler":false,...}
    ```
 
@@ -125,6 +127,8 @@ GET  /filters          facet counts for building dropdowns (cached 3 min)
 GET  /stats            totals, breakdowns, last run
 GET  /meta             categories, seniorities, work modes, known skills
 GET  /health
+GET  /live             process liveness
+GET  /ready            database readiness (503 until ready)
 ```
 
 Notes that matter when wiring this up:

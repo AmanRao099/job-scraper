@@ -6,16 +6,17 @@ axes at once - which terms to search, which city to search them in, and which
 postings survive afterwards - so one button produces a listing you would
 otherwise assemble by hand from several filtered searches.
 
-The post-scrape filter runs on top of the ordinary one in `app/enrich.py`, not
-instead of it: a posting must first be a real, current, entry-level tech job,
-and only then is it tested against the profile. Its rejections are counted
-under their own reasons so the run log shows exactly where the funnel narrowed.
+The post-scrape filter runs on top of the shared quality rules in
+`app/enrich.py`. Profiles may explicitly widen one policy, such as experience,
+but never bypass tech, freshness, completeness, or dead-listing checks. Their
+rejections are counted separately so the run log shows where the funnel narrowed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.enrich import NormalizedJob
 from app.sources.base import SearchScope
 from app.startups import is_probable_startup
@@ -25,6 +26,8 @@ from app.taxonomy import _compile as compile_terms
 REJECT_OFF_LOCATION = "outside_target_city"
 REJECT_NOT_FRESHER = "not_fresher"
 REJECT_NOT_STARTUP = "not_startup"
+REJECT_NOT_ABROAD = "not_international"
+REJECT_NO_MASTERS = "masters_not_stated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +45,18 @@ class ScrapeProfile:
     fresher_seniorities: frozenset[str] = frozenset({"fresher", "intern"})
     # A posting demanding more than this many years is not a fresher role,
     # whatever its title says.
-    max_experience_years: int = 1
+    max_experience_years: int | None = 1
     require_startup: bool = False
+    allow_any_experience: bool = False
+    require_abroad: bool = False
+    require_masters: bool = False
+    allowed_sources: tuple[str, ...] = ()
+    require_tech: bool = True
+    freshness_days: int | None = None
+    max_pages_by_source: tuple[tuple[str, int], ...] = ()
+    max_results: int | None = None
+    deduplication_scope: str = "global"
+    deactivate_unseen: bool = False
 
     _location_re: object = field(default=None, init=False, repr=False, compare=False)
 
@@ -59,6 +72,10 @@ class ScrapeProfile:
         return bool(location) and bool(self._location_re.search(location))
 
     def fresher_ok(self, job: NormalizedJob) -> bool:
+        if self.allow_any_experience:
+            return True
+        if self.max_experience_years is None:
+            return True
         if job.experience_min is not None:
             if job.experience_min > self.max_experience_years:
                 return False
@@ -79,6 +96,10 @@ class ScrapeProfile:
             return REJECT_NOT_FRESHER
         if not self.startup_ok(job):
             return REJECT_NOT_STARTUP
+        if self.require_abroad and not job.is_abroad:
+            return REJECT_NOT_ABROAD
+        if self.require_masters and not job.masters_match:
+            return REJECT_NO_MASTERS
         return None
 
     def apply(
@@ -104,6 +125,16 @@ class ScrapeProfile:
             "query_count": len(self.queries),
             "max_experience_years": self.max_experience_years,
             "require_startup": self.require_startup,
+            "allow_any_experience": self.allow_any_experience,
+            "require_abroad": self.require_abroad,
+            "require_masters": self.require_masters,
+            "allowed_sources": list(self.allowed_sources),
+            "require_tech": self.require_tech,
+            "freshness_days": self.freshness_days,
+            "max_pages_by_source": dict(self.max_pages_by_source),
+            "max_results": self.max_results,
+            "deduplication_scope": self.deduplication_scope,
+            "deactivate_unseen": self.deactivate_unseen,
         }
 
 
@@ -169,11 +200,57 @@ BANGALORE_FRESHER_STARTUPS = ScrapeProfile(
     location_terms=BENGALURU_TERMS,
     max_experience_years=1,
     require_startup=True,
+    freshness_days=settings.max_posting_age_days,
+    max_pages_by_source=(("naukri", settings.naukri_pages), ("linkedin", settings.linkedin_pages)),
+    max_results=5000,
+)
+
+
+# A compact role-family catalogue gives maintainable worldwide coverage without
+# pretending that one query per country is either necessary or exhaustive.
+WORLDWIDE_MASTERS_TECH_QUERIES: tuple[str, ...] = (
+    "software engineer masters degree",
+    "backend engineer masters degree",
+    "artificial intelligence engineer masters degree",
+    "machine learning engineer masters degree",
+    "data scientist masters degree",
+    "data engineer masters degree",
+    "research engineer masters degree",
+    "research scientist computer science masters",
+    "cloud platform engineer masters degree",
+    "cybersecurity engineer masters degree",
+    "embedded systems engineer masters degree",
+    "computer vision engineer masters degree",
+)
+
+WORLDWIDE_MASTERS_TECH = ScrapeProfile(
+    key="worldwide-masters-tech",
+    label="Worldwide · Masters tech",
+    description=(
+        "Technology jobs outside India, or explicitly open to worldwide remote "
+        "candidates, whose stored description mentions a recognized Masters-"
+        "equivalent qualification. Includes every experience and sponsorship level."
+    ),
+    queries=WORLDWIDE_MASTERS_TECH_QUERIES,
+    scope=SearchScope(
+        location="Worldwide",
+        linkedin_geo_id="",
+        linkedin_experience_filter="",
+    ),
+    max_experience_years=None,
+    allow_any_experience=True,
+    require_abroad=True,
+    require_masters=True,
+    allowed_sources=("linkedin",),
+    freshness_days=settings.max_posting_age_days,
+    max_pages_by_source=(("linkedin", settings.linkedin_pages),),
+    max_results=5000,
 )
 
 
 PROFILES: dict[str, ScrapeProfile] = {
     BANGALORE_FRESHER_STARTUPS.key: BANGALORE_FRESHER_STARTUPS,
+    WORLDWIDE_MASTERS_TECH.key: WORLDWIDE_MASTERS_TECH,
 }
 
 AVAILABLE_PROFILES = sorted(PROFILES)

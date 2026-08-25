@@ -752,6 +752,24 @@ def detect_work_mode(location: str, title: str = "", description: str = "") -> s
     return "onsite"
 
 
+_EMPLOYMENT_PATTERNS = (
+    ("internship", _compile(["internship", "summer intern", "intern role"])),
+    ("contract", _compile(["contract role", "contractor", "fixed term", "contract-to-hire"])),
+    ("part_time", _compile(["part time", "part-time"])),
+    ("temporary", _compile(["temporary role", "temporary position"])),
+    ("full_time", _compile(["full time", "full-time", "permanent role", "permanent position"])),
+)
+
+
+def detect_employment_type(title: str = "", description: str = "") -> str:
+    """Best-effort employment type using bounded title/description context."""
+    blob = f"{title} {(description or '')[:3000]}"
+    for value, pattern in _EMPLOYMENT_PATTERNS:
+        if pattern.search(blob):
+            return value
+    return "unknown"
+
+
 # =============================================================================
 # SEARCH QUERY CATALOGUE  -  drives coverage
 # =============================================================================

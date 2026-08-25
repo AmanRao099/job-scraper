@@ -205,6 +205,62 @@ class TestSearch:
         _, total = await repo.search_jobs(session, repo.JobFilters(max_experience=0))
         assert total >= 1
 
+    async def test_international_masters_filters(self, session):
+        raw = RawJob(
+            source="linkedin",
+            title="Senior Backend Engineer",
+            company="Berlin Systems",
+            apply_link="https://www.linkedin.com/jobs/view/999",
+            location="Berlin, Germany",
+            experience_text="8+ years",
+            description=(
+                "Build Python APIs. Masters degree in Computer Science preferred. "
+                "Visa sponsorship available and relocation assistance provided. "
+                "Right to work is required."
+            ),
+            declared_skills=["Python"],
+        )
+        job, reason = normalize(raw, allow_any_experience=True)
+        assert reason is None
+        async with SessionLocal() as s:
+            await repo.upsert_jobs(s, [job])
+            await s.commit()
+
+        filters = repo.JobFilters(
+            country=["germany"],
+            is_abroad=True,
+            masters_match=True,
+            education_requirement=["preferred"],
+            visa_sponsorship=["offered"],
+            relocation_support=["offered"],
+            work_authorization_required=True,
+        )
+        async with SessionLocal() as s:
+            rows, total = await repo.search_jobs(s, filters)
+        assert total == 1
+        assert rows[0].relocation_support == "offered"
+
+        from httpx import ASGITransport, AsyncClient
+        from app.api import app
+
+        transport = ASGITransport(app=app)
+        params = {
+            "country": "Germany",
+            "is_abroad": "true",
+            "masters_match": "true",
+            "education_requirement": "preferred",
+            "visa_sponsorship": "offered",
+            "relocation_support": "offered",
+            "work_authorization_required": "true",
+        }
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/jobs", params=params)
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["meta"]["total"] == 1
+            assert payload["items"][0]["country"] == "Germany"
+            assert payload["items"][0]["masters_match"] is True
+
     async def test_pagination_does_not_overlap(self, session):
         first, total = await repo.search_jobs(session, repo.JobFilters(), page=1, page_size=2)
         second, _ = await repo.search_jobs(session, repo.JobFilters(), page=2, page_size=2)
@@ -229,6 +285,106 @@ class TestLifecycle:
             await s.commit()
         async with SessionLocal() as s:
             assert await repo.count_jobs(s, active_only=False) == 0
+
+    async def test_reindex_never_deactivates_jobs_using_a_global_profile_policy(self, session):
+        import argparse
+        from sqlalchemy import select
+
+        from main import _reindex
+
+        raws = [
+            RawJob(
+                source="linkedin",
+                title="Senior Cloud Engineer",
+                company="International Systems",
+                apply_link="https://www.linkedin.com/jobs/view/7001",
+                location="Paris, France",
+                experience_text="9+ years",
+                description="Build AWS platforms. Masters degree preferred.",
+                declared_skills=["AWS"],
+            ),
+            RawJob(
+                source="naukri",
+                title="Senior Cloud Engineer",
+                company="Domestic Systems",
+                apply_link="https://www.naukri.com/job-listings-7002",
+                location="Pune, Maharashtra",
+                experience_text="9+ years",
+                description="Build AWS platforms. Masters degree preferred.",
+                declared_skills=["AWS"],
+            ),
+        ]
+        normalized = []
+        for raw in raws:
+            job, reason = normalize(raw, allow_any_experience=True)
+            assert reason is None
+            normalized.append(job)
+        async with SessionLocal() as s:
+            await repo.upsert_jobs(s, normalized)
+            await s.commit()
+
+        assert await _reindex(argparse.Namespace(verbose=False)) == 0
+
+        async with SessionLocal() as s:
+            rows = (
+                await s.execute(
+                    select(Job).where(Job.company.in_(["International Systems", "Domestic Systems"]))
+                )
+            ).scalars().all()
+        active = {row.company: row.is_active for row in rows}
+        assert active == {"International Systems": True, "Domestic Systems": True}
+
+    async def test_reindex_is_batched_dry_runnable_and_idempotent(self, session):
+        from sqlalchemy import select
+
+        from app.reindex import reindex_jobs
+
+        async with SessionLocal() as s:
+            row = (await s.execute(select(Job).order_by(Job.id))).scalars().first()
+            target_id = row.id
+            row.search_blob = "stale"
+            await s.commit()
+
+        dry = await reindex_jobs(batch_size=2, dry_run=True)
+        assert dry.changed >= 1 and dry.batches_committed == 0
+        async with SessionLocal() as s:
+            assert (await s.get(Job, target_id)).search_blob == "stale"
+
+        applied = await reindex_jobs(batch_size=2)
+        assert applied.changed >= 1 and applied.batches_committed >= 2
+        rerun = await reindex_jobs(batch_size=2)
+        assert rerun.changed == 0 and rerun.unchanged == rerun.scanned
+
+    async def test_partial_source_run_never_triggers_global_deactivation(
+        self, session, monkeypatch
+    ):
+        from app import pipeline
+
+        async with SessionLocal() as s:
+            run = await repo.create_run(s, ["linkedin"], "test")
+            run_id = run.id
+            await s.commit()
+
+        raw = RawJob(
+            source="linkedin", external_id="partial-1", title="Python Engineer",
+            company="Partial Co", location="Pune", apply_link="https://example.com/partial",
+            description="Build production Python REST APIs.", declared_skills=["Python"],
+        )
+
+        async def partial_collect(*args, **kwargs):
+            return [raw], {"linkedin": 1}, {
+                "linkedin": {"errors": {"timeout": 1}, "responses_accepted": 1}
+            }
+
+        async def forbidden_housekeeping():
+            raise AssertionError("partial runs must not deactivate unseen jobs")
+
+        monkeypatch.setattr(pipeline, "_collect", partial_collect)
+        monkeypatch.setattr(pipeline, "_housekeeping", forbidden_housekeeping)
+        stats = await pipeline.run_scrape(
+            run_id=run_id, sources=["linkedin"], queries=["python"]
+        )
+        assert stats.outcome == "partial"
 
 
 class TestRunRecovery:
@@ -408,6 +564,53 @@ class TestHttp:
             assert (await client.get("/filters")).status_code == 200
             assert (await client.get("/stats")).status_code == 200
             assert (await client.get("/meta")).status_code == 200
+
+    async def test_liveness_readiness_request_id_and_bounded_inputs(self, session):
+        from httpx import ASGITransport, AsyncClient
+
+        from app.api import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            live = await client.get("/live", headers={"X-Request-ID": "test-request-1"})
+            assert live.status_code == 200
+            assert live.headers["x-request-id"] == "test-request-1"
+            assert (await client.get("/ready")).status_code == 200
+            assert (await client.get("/jobs", params={"page": 100_001})).status_code == 422
+            assert (await client.get("/jobs", params={"q": "x" * 201})).status_code == 422
+
+    async def test_invalid_enum_and_experience_range_fail_clearly(self, session):
+        from httpx import ASGITransport, AsyncClient
+
+        from app.api import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            invalid = await client.get("/jobs", params={"visa_sponsorship": "definitely"})
+            assert invalid.status_code == 422
+            invalid_range = await client.get(
+                "/jobs", params={"min_experience": 5, "max_experience": 2}
+            )
+            assert invalid_range.status_code == 422
+
+    async def test_cors_only_allows_configured_origin(self, session):
+        from httpx import ASGITransport, AsyncClient
+
+        from app.api import app
+
+        transport = ASGITransport(app=app)
+        headers = {
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        }
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            allowed = await client.options("/jobs", headers=headers)
+            assert allowed.status_code == 200
+            assert allowed.headers["access-control-allow-origin"] == headers["Origin"]
+            denied = await client.options(
+                "/jobs", headers={**headers, "Origin": "https://evil.example"}
+            )
+            assert "access-control-allow-origin" not in denied.headers
 
     async def test_scrape_profiles_are_listed_and_validated(self, session):
         from httpx import ASGITransport, AsyncClient

@@ -23,7 +23,7 @@ services:
     # Trusted-proxy config is passed via FORWARDED_ALLOW_IPS below rather than a
     # CLI flag, so no shell quoting of "*" is involved.
     startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
-    healthCheckPath: /health
+    healthCheckPath: /ready
     autoDeploy: true
     envVars:
       # ---- set these in the dashboard --------------------------------
@@ -39,6 +39,9 @@ services:
       # Optional. Only needed if your frontend's hostname changes per deploy;
       # leave blank otherwise. Example: https://.*\.my-app\.vercel\.app
       - key: CORS_ORIGIN_REGEX
+        sync: false
+      # Public API hostname(s), without scheme, e.g. jobs-api.onrender.com.
+      - key: ALLOWED_HOSTS
         sync: false
 
       # ---- generated once, then stable -------------------------------
@@ -56,6 +59,8 @@ services:
         value: "*"
       - key: ENVIRONMENT
         value: production
+      - key: DATABASE_SSL_MODE
+        value: verify-full
       - key: LOG_LEVEL
         value: INFO
       # The scraper runs in GitHub Actions. A free instance that sleeps cannot
