@@ -24,10 +24,14 @@ COPY main.py ./
 
 # Only used if someone points DATABASE_URL back at SQLite. On a free host that
 # disk is wiped on every deploy, so production uses Postgres.
-RUN mkdir -p /app/data
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8000
 
 # Render (and most PaaS) inject the port to bind on; 8000 is the local default.
 # One worker: the scrape lock is per-process.
-CMD ["sh", "-c", "uvicorn app.api:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --forwarded-allow-ips '*'"]
+CMD ["sh", "-c", "uvicorn app.api:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --forwarded-allow-ips ${FORWARDED_ALLOW_IPS:-127.0.0.1}"]

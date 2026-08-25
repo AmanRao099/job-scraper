@@ -14,6 +14,55 @@ from app.enrich import (
 )
 from app.models import make_fingerprint
 from app.sources.base import RawJob
+
+
+def test_one_malformed_record_does_not_discard_the_batch():
+    malformed = RawJob(
+        source="linkedin", title=None, company="Broken", apply_link="https://example.com/bad"
+    )
+    valid = RawJob(
+        source="linkedin", external_id="ok-1", title="Python Engineer", company="Acme",
+        apply_link="https://example.com/good", description="Build Django REST APIs with Python.",
+        declared_skills=["Python"],
+    )
+    jobs, rejected = normalize_many([malformed, valid])
+    assert len(jobs) == 1
+    assert rejected["parsing_failure"] == 1
+
+
+def test_same_title_same_company_distinct_source_ids_are_not_merged():
+    common = dict(
+        source="linkedin", title="Software Engineer", company="Acme", location="Paris, France",
+        description="Build Python cloud services.", declared_skills=["Python"],
+    )
+    jobs, rejected = normalize_many([
+        RawJob(external_id="100", apply_link="https://linkedin.com/jobs/view/100", **common),
+        RawJob(external_id="200", apply_link="https://linkedin.com/jobs/view/200", **common),
+    ])
+    assert not rejected and len(jobs) == 2
+
+
+def test_cross_source_duplicate_merges_discovery_metadata_and_richer_content():
+    jobs, rejected = normalize_many([
+        RawJob(
+            source="linkedin", external_id="100", title="Software Engineer", company="Acme",
+            location="Paris, France", apply_link="https://linkedin.com/jobs/view/100",
+            description="Python role.", declared_skills=["Python"], discovered_query="software",
+        ),
+        RawJob(
+            source="other", external_id="abc", title="Software Engineer", company="Acme",
+            location="Paris", apply_link="https://jobs.acme.test/apply?id=abc&utm_source=board",
+            description="Build production Python and AWS cloud services for customers.",
+            declared_skills=["Python", "AWS"], discovered_query="cloud",
+        ),
+    ], profile_key="worldwide-masters-tech")
+    assert not rejected and len(jobs) == 1
+    job = jobs[0]
+    assert len(job.description) > len("Python role.")
+    assert job.source_ids == ["linkedin:100", "other:abc"]
+    assert job.discovered_queries == ["cloud", "software"]
+    assert job.discovered_profiles == ["worldwide-masters-tech"]
+    assert "utm_source" not in job.apply_link and "id=abc" in job.apply_link
 from app.utils import utcnow
 
 
@@ -44,6 +93,10 @@ class TestNormalize:
 
     def test_missing_apply_link_is_incomplete(self):
         _, reason = normalize(make_raw(apply_link=""))
+        assert reason == REJECT_INCOMPLETE
+
+    def test_non_web_apply_link_is_incomplete(self):
+        _, reason = normalize(make_raw(apply_link="javascript:void(0)"))
         assert reason == REJECT_INCOMPLETE
 
     def test_non_tech_rejected(self):

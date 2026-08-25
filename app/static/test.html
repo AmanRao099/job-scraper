@@ -262,7 +262,7 @@ function queryString() {
 
 function fillSelect(id, values, keepAll) {
   const sel = $(id), current = sel.value;
-  sel.innerHTML = '';
+  sel.replaceChildren();
   sel.appendChild(new Option(keepAll, ''));
   for (const item of values || []) {
     sel.appendChild(new Option(`${item.value} (${item.count})`, item.value));
@@ -326,7 +326,7 @@ async function loadJobs() {
     $('resultCount').textContent = `${meta.total} job${meta.total === 1 ? '' : 's'} · page ${meta.page}/${meta.total_pages || 1}`;
 
     const list = $('jobList');
-    list.innerHTML = '';
+    list.replaceChildren();
     if (!data.items.length) {
       const empty = el('div', 'empty');
       empty.appendChild(el('p', '', 'No jobs match these filters.'));
@@ -344,7 +344,7 @@ async function loadJobs() {
 
 function renderPager() {
   const p = $('pager');
-  p.innerHTML = '';
+  p.replaceChildren();
   if (!meta || meta.total_pages <= 1) return;
   const prev = el('button', 'ghost', '← Prev');
   prev.disabled = !meta.has_prev;
@@ -358,18 +358,23 @@ function renderPager() {
 /* -------------------------------------------------------- status/facets */
 async function loadStatus() {
   const pills = $('statusPills');
-  pills.innerHTML = '';
-  const add = (html) => { const s = el('span', 'pill'); s.innerHTML = html; pills.appendChild(s); };
+  pills.replaceChildren();
+  const add = (text, state = '') => {
+    const s = el('span', 'pill');
+    if (state) s.appendChild(el('span', `dot ${state}`));
+    s.appendChild(document.createTextNode(text));
+    pills.appendChild(s);
+  };
   try {
     const [health, stats] = await Promise.all([call('/health'), call('/stats')]);
-    add(`<span class="dot ok"></span>API ${health.version}`);
-    add(`db <b>${health.database ? 'ok' : 'down'}</b>`);
-    add(`scheduler <b>${health.scheduler ? 'on' : 'off'}</b>`);
-    add(`active <b>${stats.active_jobs}</b>`);
-    add(`today <b>${stats.jobs_added_today}</b>`);
-    if (stats.last_run) add(`last run <b>#${stats.last_run.id} ${stats.last_run.status}</b>`);
+    add(`API ${health.version}`, 'ok');
+    add(`db ${health.database ? 'ok' : 'down'}`);
+    add(`scheduler ${health.scheduler ? 'on' : 'off'}`);
+    add(`active ${stats.active_jobs}`);
+    add(`today ${stats.jobs_added_today}`);
+    if (stats.last_run) add(`last run #${stats.last_run.id} ${stats.last_run.status}`);
   } catch (e) {
-    add(`<span class="dot err"></span>API unreachable`);
+    add('API unreachable', 'err');
     banner(`Cannot reach the API at ${API}. Start it with: python main.py serve`);
   }
 }

@@ -9,9 +9,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import timedelta, timezone
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, insert, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -39,6 +39,14 @@ class JobFilters:
     skill: list[str] | None = None
     seniority: list[str] | None = None
     work_mode: list[str] | None = None
+    employment_type: list[str] | None = None
+    country: list[str] | None = None
+    is_abroad: bool | None = None
+    masters_match: bool | None = None
+    education_requirement: list[str] | None = None
+    visa_sponsorship: list[str] | None = None
+    relocation_support: list[str] | None = None
+    work_authorization_required: bool | None = None
     location: str | None = None
     company: str | None = None
     min_experience: int | None = None
@@ -56,10 +64,11 @@ class JobFilters:
 class UpsertResult:
     created: int = 0
     updated: int = 0
+    unchanged: int = 0
 
     @property
     def total(self) -> int:
-        return self.created + self.updated
+        return self.created + self.updated + self.unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -69,49 +78,150 @@ class UpsertResult:
 async def upsert_jobs(session: AsyncSession, jobs: list[NormalizedJob]) -> UpsertResult:
     """Insert new postings, refresh ones we have already seen.
 
-    Done as one bulk fingerprint lookup plus in-memory diffing so a 5,000 job
-    batch costs two round-trips rather than 5,000.
+    Identity lookups are grouped in small bounded batches, then merged in
+    memory. The bound stays below SQLite's conservative 999-variable limit;
+    it is still orders of magnitude cheaper than a query per job.
     """
     result = UpsertResult()
     if not jobs:
         return result
 
-    fingerprints = [job.fingerprint for job in jobs]
-    existing_rows = (
-        await session.execute(select(Job).where(Job.fingerprint.in_(fingerprints)))
-    ).scalars().all()
-    existing = {row.fingerprint: row for row in existing_rows}
+    existing_by_id: dict[int, Job] = {}
+    lookup_size = 100
+    for start in range(0, len(jobs), lookup_size):
+        lookup = jobs[start : start + lookup_size]
+        fingerprints = {job.fingerprint for job in lookup} | {
+            job.dedup_key for job in lookup
+        }
+        dedup_keys = {job.dedup_key for job in lookup if job.dedup_key}
+        canonical_urls = {job.canonical_url for job in lookup if job.canonical_url}
+        source_ids = {(job.source, job.external_id) for job in lookup if job.external_id}
+        conditions = [Job.fingerprint.in_(fingerprints)]
+        if dedup_keys:
+            conditions.append(Job.dedup_key.in_(dedup_keys))
+        if canonical_urls:
+            conditions.append(Job.canonical_url.in_(canonical_urls))
+        if source_ids:
+            conditions.append(tuple_(Job.source, Job.external_id).in_(source_ids))
+        found = (
+            await session.execute(select(Job).where(or_(*conditions)))
+        ).scalars().all()
+        existing_by_id.update({row.id: row for row in found})
+    existing_rows = list(existing_by_id.values())
+    by_fingerprint = {row.fingerprint: row for row in existing_rows}
+    by_source_id = {
+        (row.source, row.external_id): row for row in existing_rows if row.external_id
+    }
+    by_url = {row.canonical_url: row for row in existing_rows if row.canonical_url}
+    by_dedup: dict[str, list[Job]] = {}
+    for row in existing_rows:
+        key = row.dedup_key or row.fingerprint
+        by_dedup.setdefault(key, []).append(row)
 
     now = utcnow()
     new_models: list[Job] = []
 
     for job in jobs:
-        row = existing.get(job.fingerprint)
+        row = (
+            by_source_id.get((job.source, job.external_id))
+            if job.external_id
+            else None
+        )
+        row = row or by_url.get(job.canonical_url) or by_fingerprint.get(job.fingerprint)
+        if row is None:
+            for candidate in by_dedup.get(job.dedup_key, []):
+                distinct_same_source_ids = (
+                    candidate.source == job.source
+                    and candidate.external_id
+                    and job.external_id
+                    and candidate.external_id != job.external_id
+                )
+                if not distinct_same_source_ids:
+                    row = candidate
+                    break
         payload = job.as_row()
 
         if row is None:
             model = Job(**payload, first_seen_at=now, last_seen_at=now, is_active=True)
             model.search_blob = model.build_search_blob()
             new_models.append(model)
+            by_fingerprint[model.fingerprint] = model
+            if model.external_id:
+                by_source_id[(model.source, model.external_id)] = model
+            if model.canonical_url:
+                by_url[model.canonical_url] = model
+            by_dedup.setdefault(model.dedup_key, []).append(model)
             result.created += 1
             continue
 
-        # Refresh everything except the discovery timestamp; a re-listed job
-        # should not look brand new to the frontend.
+        changed = False
+        incoming_is_richer = len(job.description or "") > len(row.description or "")
+        list_fields = {
+            "skills", "categories", "source_ids", "source_urls",
+            "discovered_profiles", "discovered_queries", "degree_requirements",
+        }
+        derived_fields = {
+            "description", "experience_text", "experience_min", "experience_max",
+            "category", "categories", "seniority", "work_mode", "employment_type",
+            "degree_requirements", "masters_match", "education_requirement", "country",
+            "is_abroad", "visa_sponsorship", "work_authorization_required",
+            "relocation_support", "skills",
+        }
         for key, value in payload.items():
-            # Never overwrite a good description with an empty one.
-            if key == "description" and not value and row.description:
+            old = getattr(row, key)
+            if key in list_fields:
+                value = sorted(set(old or []) | set(value or []))
+            elif key == "posted_at":
+                old_cmp = old
+                value_cmp = value
+                if old_cmp is not None and old_cmp.tzinfo is None:
+                    old_cmp = old_cmp.replace(tzinfo=timezone.utc)
+                if value_cmp is not None and value_cmp.tzinfo is None:
+                    value_cmp = value_cmp.replace(tzinfo=timezone.utc)
+                if value is None or (old_cmp is not None and old_cmp >= value_cmp):
+                    continue
+            elif key in derived_fields and not incoming_is_richer:
                 continue
-            if key == "posted_at" and value is None:
+            elif value in (None, "") and old not in (None, ""):
                 continue
-            setattr(row, key, value)
+            elif key in {"fingerprint", "source", "external_id", "apply_link"}:
+                continue
+            if old != value:
+                setattr(row, key, value)
+                changed = True
+
+        # Prefer HTTPS and direct employer links, but never replace a usable URL
+        # with a blank or lower-quality board link.
+        def link_score(value: str) -> tuple[int, int]:
+            lowered = (value or "").lower()
+            is_board = "linkedin.com" in lowered or "naukri.com" in lowered
+            return (int(not is_board), int(lowered.startswith("https://")))
+
+        if job.apply_link and link_score(job.apply_link) > link_score(row.apply_link):
+            row.apply_link = job.apply_link
+            changed = True
         row.last_seen_at = now
-        row.is_active = True
-        row.search_blob = row.build_search_blob()
-        result.updated += 1
+        if not row.is_active:
+            row.is_active = True
+            changed = True
+        rebuilt = row.build_search_blob()
+        if row.search_blob != rebuilt:
+            row.search_blob = rebuilt
+            changed = True
+        if changed:
+            result.updated += 1
+        else:
+            result.unchanged += 1
 
     if new_models:
-        session.add_all(new_models)
+        columns = [column.name for column in Job.__table__.columns if column.name != "id"]
+        await session.execute(
+            insert(Job),
+            [
+                {name: getattr(model, name) for name in columns}
+                for model in new_models
+            ],
+        )
 
     await session.flush()
     return result
@@ -175,6 +285,40 @@ def _apply_filters(stmt, filters: JobFilters):
         stmt = stmt.where(Job.seniority.in_([s.lower() for s in filters.seniority]))
     if filters.work_mode:
         stmt = stmt.where(Job.work_mode.in_([w.lower() for w in filters.work_mode]))
+    if filters.employment_type:
+        stmt = stmt.where(
+            Job.employment_type.in_([value.lower() for value in filters.employment_type])
+        )
+    if filters.country:
+        countries = [value.lower() for value in filters.country]
+        country_match = func.lower(Job.country).in_(countries)
+        stmt = stmt.where(
+            or_(Job.country.is_(None), country_match)
+            if "unknown" in countries
+            else country_match
+        )
+    if filters.is_abroad is not None:
+        stmt = stmt.where(Job.is_abroad.is_(filters.is_abroad))
+    if filters.masters_match is not None:
+        stmt = stmt.where(Job.masters_match.is_(filters.masters_match))
+    if filters.education_requirement:
+        stmt = stmt.where(
+            Job.education_requirement.in_(
+                [value.lower() for value in filters.education_requirement]
+            )
+        )
+    if filters.visa_sponsorship:
+        stmt = stmt.where(
+            Job.visa_sponsorship.in_([value.lower() for value in filters.visa_sponsorship])
+        )
+    if filters.relocation_support:
+        stmt = stmt.where(
+            Job.relocation_support.in_([value.lower() for value in filters.relocation_support])
+        )
+    if filters.work_authorization_required is not None:
+        stmt = stmt.where(
+            Job.work_authorization_required.is_(filters.work_authorization_required)
+        )
 
     if filters.skill:
         # Match the fenced skill token, not a bare substring. '%java%' also
@@ -228,7 +372,11 @@ async def search_jobs(
     order: str = "desc",
 ) -> tuple[list[Job], int]:
     column = SORTABLE.get(sort, Job.posted_at)
-    direction = column.desc() if order.lower() == "desc" else column.asc()
+    direction = (
+        column.desc().nullslast()
+        if order.lower() == "desc"
+        else column.asc().nullslast()
+    )
 
     count_stmt = _apply_filters(select(func.count(Job.id)), filters)
     total = (await session.execute(count_stmt)).scalar_one()

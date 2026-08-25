@@ -17,6 +17,22 @@ from app.taxonomy import (
 )
 
 
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("This is a full-time permanent position", "full_time"),
+        ("Six month contract role", "contract"),
+        ("Part-time developer", "part_time"),
+        ("Summer internship", "internship"),
+        ("Build Python APIs", "unknown"),
+    ],
+)
+def test_employment_type(text, expected):
+    from app.taxonomy import detect_employment_type
+
+    assert detect_employment_type(text, text) == expected
+
+
 class TestSkillExtraction:
     def test_matches_whole_tokens_only(self):
         # "ai" inside "Retail", "ml" inside "HTML", "c" inside every word.

@@ -27,6 +27,14 @@ const EMPTY_FILTERS = {
   skills: [],
   seniority: '',
   workMode: '',
+  employmentType: '',
+  country: '',
+  isAbroad: '',
+  mastersMatch: '',
+  educationRequirement: '',
+  visaSponsorship: '',
+  relocationSupport: '',
+  workAuthorizationRequired: '',
   maxExperience: '',
   postedWithinDays: '',
   sort: 'posted_at',
@@ -99,6 +107,17 @@ function JobCard({ job }) {
         <span className="badge">{job.category}</span>
         <span className="badge">{job.seniority}</span>
         {job.work_mode !== 'onsite' && <span className="badge">{job.work_mode}</span>}
+        {job.country && <span className="badge">{job.country}</span>}
+        {job.is_abroad && <span className="badge badge-international">International</span>}
+        {job.masters_match && (
+          <span className="badge badge-masters">Masters · {job.education_requirement}</span>
+        )}
+        {job.employment_type !== 'unknown' && (
+          <span className="badge">{job.employment_type.replace('_', ' ')}</span>
+        )}
+        <span className="badge">Visa · {job.visa_sponsorship.replace('_', ' ')}</span>
+        <span className="badge">Relocation · {job.relocation_support.replace('_', ' ')}</span>
+        {job.work_authorization_required && <span className="badge">Work authorization required</span>}
         {job.experience_text && <span className="badge">{job.experience_text}</span>}
         {job.salary_text && <span className="badge">{job.salary_text}</span>}
       </div>
@@ -163,12 +182,19 @@ function RunConsole({ runId, onFinished }) {
       <div className="panel-head">
         <Terminal size={17} />
         <span>Run #{runId}</span>
-        <div className="progress-track">
+        <div
+          className="progress-track"
+          role="progressbar"
+          aria-label="Scrape progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={progress}
+        >
           <div className="progress-bar" style={{ width: `${progress}%` }} />
         </div>
         <span className="progress-text">{progress}%</span>
       </div>
-      <div className="console">
+      <div className="console" role="log" aria-live="polite">
         {lines.length === 0 && <div className="console-idle">Waiting for output…</div>}
         {lines.map((line, index) => (
           <div key={index} className={`console-line ${line.level}`}>
@@ -199,6 +225,7 @@ export default function App() {
   const [runId, setRunId] = useState(null);
   const [starting, setStarting] = useState(null);
   const [profiles, setProfiles] = useState([]);
+  const requestSequence = useRef(0);
 
   // Debounce the text boxes so typing does not fire a request per keystroke.
   useEffect(() => {
@@ -214,21 +241,24 @@ export default function App() {
     [filters, debouncedQ, debouncedLocation],
   );
 
-  const loadJobs = useCallback(async () => {
+  const loadJobs = useCallback(async (signal) => {
+    const sequence = ++requestSequence.current;
     setLoading(true);
     try {
-      const data = await api.jobs(activeFilters, page, PAGE_SIZE);
+      const data = await api.jobs(activeFilters, page, PAGE_SIZE, signal);
+      if (sequence !== requestSequence.current) return;
       setJobs(data.items);
       setMeta(data.meta);
       setError('');
     } catch (err) {
+      if (err.code === 'ERR_CANCELED' || sequence !== requestSequence.current) return;
       setError(
         err.response
           ? `API error ${err.response.status}`
           : `Cannot reach the API. Is it running on ${API_BASE}?`,
       );
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   }, [activeFilters, page]);
 
@@ -243,7 +273,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadJobs();
+    const controller = new AbortController();
+    loadJobs(controller.signal);
+    return () => controller.abort();
   }, [loadJobs]);
 
   useEffect(() => {
@@ -260,6 +292,14 @@ export default function App() {
     filters.source,
     filters.seniority,
     filters.workMode,
+    filters.employmentType,
+    filters.country,
+    filters.isAbroad,
+    filters.mastersMatch,
+    filters.educationRequirement,
+    filters.visaSponsorship,
+    filters.relocationSupport,
+    filters.workAuthorizationRequired,
     filters.maxExperience,
     filters.postedWithinDays,
     filters.skills,
@@ -307,7 +347,7 @@ export default function App() {
         status === 409
           ? 'A scrape is already running.'
           : status === 401
-            ? 'Scraping requires an admin token (set VITE_ADMIN_TOKEN).'
+            ? 'Scraping is restricted to an authenticated admin client.'
             : 'Could not start the scrape.',
       );
     } finally {
@@ -315,7 +355,11 @@ export default function App() {
     }
   };
 
-  const onRunFinished = useCallback(() => {
+  const onRunFinished = useCallback((result) => {
+    setRunId(null);
+    if (result?.status === 'disconnected') {
+      setError('The live scrape connection was interrupted. Retry or check run status later.');
+    }
     loadJobs();
     loadSidebars();
   }, [loadJobs, loadSidebars]);
@@ -327,6 +371,14 @@ export default function App() {
     filters.source ||
     filters.seniority ||
     filters.workMode ||
+    filters.employmentType ||
+    filters.country ||
+    filters.isAbroad ||
+    filters.mastersMatch ||
+    filters.educationRequirement ||
+    filters.visaSponsorship ||
+    filters.relocationSupport ||
+    filters.workAuthorizationRequired ||
     filters.maxExperience ||
     filters.postedWithinDays ||
     filters.skills.length > 0;
@@ -373,8 +425,11 @@ export default function App() {
       </header>
 
       {error && (
-        <div className="alert">
+        <div className="alert" role="alert">
           <AlertCircle size={16} /> {error}
+          <button type="button" className="btn ghost" onClick={() => loadJobs()}>
+            Retry
+          </button>
         </div>
       )}
 
@@ -430,6 +485,71 @@ export default function App() {
             onChange={(v) => update('workMode', v)}
             options={facets?.work_modes || []}
           />
+          <Select
+            label="Employment type"
+            allLabel="Any type"
+            value={filters.employmentType}
+            onChange={(v) => update('employmentType', v)}
+            options={facets?.employment_types || []}
+          />
+          <Select
+            label="Country"
+            allLabel="All countries"
+            value={filters.country}
+            onChange={(v) => update('country', v)}
+            options={facets?.countries || []}
+          />
+          <label className="field">
+            <span className="field-label">International</span>
+            <select value={filters.isAbroad} onChange={(e) => update('isAbroad', e.target.value)}>
+              <option value="">All jobs</option>
+              <option value="true">International only</option>
+              <option value="false">India / unknown only</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Masters qualification</span>
+            <select
+              value={filters.mastersMatch}
+              onChange={(e) => update('mastersMatch', e.target.value)}
+            >
+              <option value="">Any</option>
+              <option value="true">Masters mentioned</option>
+              <option value="false">Not stated</option>
+            </select>
+          </label>
+          <Select
+            label="Education status"
+            allLabel="Any status"
+            value={filters.educationRequirement}
+            onChange={(v) => update('educationRequirement', v)}
+            options={facets?.education_requirements || []}
+          />
+          <Select
+            label="Visa sponsorship"
+            allLabel="Any status"
+            value={filters.visaSponsorship}
+            onChange={(v) => update('visaSponsorship', v)}
+            options={facets?.visa_sponsorships || []}
+          />
+          <Select
+            label="Relocation support"
+            allLabel="Any status"
+            value={filters.relocationSupport}
+            onChange={(v) => update('relocationSupport', v)}
+            options={facets?.relocation_supports || []}
+          />
+          <label className="field">
+            <span className="field-label">Work authorization</span>
+            <select
+              value={filters.workAuthorizationRequired}
+              onChange={(e) => update('workAuthorizationRequired', e.target.value)}
+            >
+              <option value="">Any</option>
+              <option value="true">Requirement stated</option>
+              <option value="false">Not detected</option>
+            </select>
+          </label>
 
           <label className="field">
             <span className="field-label">Max experience</span>
@@ -512,7 +632,7 @@ export default function App() {
           </div>
 
           {meta && meta.total_pages > 1 && (
-            <nav className="pager">
+            <nav className="pager" aria-label="Job result pages">
               <button className="btn ghost" disabled={!meta.has_prev} onClick={() => setPage(page - 1)}>
                 <ChevronLeft size={15} /> Previous
               </button>

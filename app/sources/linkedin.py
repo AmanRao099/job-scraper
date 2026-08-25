@@ -22,8 +22,10 @@ from urllib.parse import quote
 from bs4 import BeautifulSoup
 
 from app.config import settings
-from app.http_client import HttpClient
-from app.sources.base import JobSource, RawJob, SearchScope
+from app.http_client import HttpClient, gather_bounded
+from app.sources.base import (
+    JobSource, RawJob, SearchScope, blocked_page_reason, is_no_results_page,
+)
 from app.sources.browser import BrowserRenderer
 from app.utils import (
     absolute_url,
@@ -74,15 +76,16 @@ class LinkedInSource(JobSource):
 
     # ------------------------------------------------------------------ fetch
     async def fetch(self, queries: list[str]) -> list[RawJob]:
-        results = await asyncio.gather(
-            *(self._fetch_query(query) for query in queries),
-            return_exceptions=True,
+        results = await gather_bounded(
+            [self._fetch_query(query) for query in queries],
+            settings.linkedin_query_concurrency,
         )
 
         jobs: list[RawJob] = []
         for query, result in zip(queries, results):
             if isinstance(result, BaseException):
                 logger.warning("LinkedIn query %r failed: %s", query, result)
+                self.stats.fail("query_exception")
                 continue
             jobs.extend(result)
 
@@ -91,23 +94,37 @@ class LinkedInSource(JobSource):
         unique: dict[str, RawJob] = {}
         for job in jobs:
             key = job.external_id or job.apply_link
+            if key in unique:
+                self.stats.duplicates_skipped += 1
             unique.setdefault(key, job)
         deduped = list(unique.values())
 
         if settings.linkedin_fetch_descriptions and deduped and not self.cancelled:
             await self._attach_descriptions(deduped)
 
+        self.finish_stats(len(deduped))
         return deduped
 
     async def _fetch_query(self, query: str) -> list[RawJob]:
         jobs: list[RawJob] = []
+        page_signatures: set[tuple[str, ...]] = set()
         for page in range(self.pages):
             if self.cancelled:
                 break
             batch = await self._fetch_page(query, page)
             await self.report(1, f"linkedin '{query}' page {page + 1}")
+            if batch is None:
+                break
             if not batch:
                 break  # no more results for this term
+            signature = tuple(job.external_id or job.apply_link for job in batch)
+            if signature in page_signatures:
+                self.stats.repeated_pages += 1
+                self.stats.fail("repeated_page")
+                break
+            page_signatures.add(signature)
+            for job in batch:
+                job.discovered_query = query
             jobs.extend(batch)
 
         if not jobs:
@@ -116,12 +133,15 @@ class LinkedInSource(JobSource):
         await self.report(0, f"linkedin '{query}' -> {len(jobs)} postings")
         return jobs
 
-    async def _fetch_page(self, query: str, page: int) -> list[RawJob]:
+    async def _fetch_page(self, query: str, page: int) -> list[RawJob] | None:
+        experience_filter = self.scope.linkedin_experience_filter
+        if experience_filter is None:
+            experience_filter = EXPERIENCE_FILTER
         params = {
             "keywords": query,
             "location": self.scope.location,
             "geoId": self.scope.linkedin_geo_id,
-            "f_E": EXPERIENCE_FILTER,
+            "f_E": experience_filter,
             "f_TPR": f"r{settings.max_posting_age_days * 86400}"
             if settings.max_posting_age_days
             else "",
@@ -131,10 +151,28 @@ class LinkedInSource(JobSource):
         params = {k: v for k, v in params.items() if v != ""}
         headers = {**GUEST_HEADERS, "User-Agent": self.client.random_user_agent()}
 
-        html = await self.client.get_text(SEARCH_API, params=params, headers=headers)
-        if not html or "base-card" not in html:
+        self.stats.pages_attempted += 1
+        result = await self.client.fetch_text(SEARCH_API, params=params, headers=headers)
+        if not result.ok:
+            self.stats.fail(result.error or "network_error", network=True)
+            return None
+        html = result.value or ""
+        blocked = blocked_page_reason(html)
+        if blocked:
+            self.stats.fail(f"blocked:{blocked}", blocked=True)
+            return None
+        if not html.strip():
             return []
-        return self._parse_cards(html)
+        if "base-card" not in html:
+            if is_no_results_page(html):
+                self.stats.responses_accepted += 1
+                return []
+            self.stats.parse_failures += 1
+            self.stats.fail("unexpected_search_markup")
+            return None
+        parsed = self._parse_cards(html)
+        self.stats.responses_accepted += 1
+        return parsed
 
     # ------------------------------------------------------------------ parse
     def _parse_cards(self, html: str) -> list[RawJob]:
@@ -206,11 +244,17 @@ class LinkedInSource(JobSource):
             if self.cancelled:
                 return
             headers = {**GUEST_HEADERS, "User-Agent": self.client.random_user_agent()}
-            html = await self.client.get_text(
+            result = await self.client.fetch_text(
                 f"{POSTING_API}/{job.external_id}", headers=headers
             )
             await asyncio.sleep(DESCRIPTION_SPACING_SECONDS)
-        if not html:
+        if not result.ok:
+            self.stats.fail(f"description:{result.error}", network=True)
+            return
+        html = result.value or ""
+        blocked = blocked_page_reason(html)
+        if blocked:
+            self.stats.fail(f"description_blocked:{blocked}", blocked=True)
             return
 
         soup = BeautifulSoup(html, "lxml")
@@ -244,11 +288,15 @@ class LinkedInSource(JobSource):
         if self.renderer is None or not self.renderer.enabled:
             return []
 
-        url = (
-            f"{BASE}/jobs/search?keywords={quote(query)}"
-            f"&location={quote(self.scope.location)}&geoId={self.scope.linkedin_geo_id}"
-            f"&f_E={EXPERIENCE_FILTER}"
-        )
+        experience_filter = self.scope.linkedin_experience_filter
+        if experience_filter is None:
+            experience_filter = EXPERIENCE_FILTER
+        parts = [f"keywords={quote(query)}", f"location={quote(self.scope.location)}"]
+        if self.scope.linkedin_geo_id:
+            parts.append(f"geoId={self.scope.linkedin_geo_id}")
+        if experience_filter:
+            parts.append(f"f_E={experience_filter}")
+        url = f"{BASE}/jobs/search?{'&'.join(parts)}"
         logger.info("LinkedIn guest API returned nothing for %r; falling back to browser", query)
         html = await self.renderer.render(url, wait_for="div.base-card", scrolls=5)
         if not html:

@@ -8,4 +8,4 @@
 # Naukri's JSON API is reCAPTCHA-gated and its search page is client-rendered,
 # so that source has to be rendered in a real browser. Also a LinkedIn fallback.
 # After installing, run: playwright install --with-deps chromium
-playwright>=1.49
+playwright==1.62.0

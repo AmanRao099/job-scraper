@@ -19,15 +19,16 @@ implementation take hours: everything needed is already on the card.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 
 from bs4 import BeautifulSoup
 
 from app.config import settings
-from app.http_client import HttpClient
-from app.sources.base import JobSource, RawJob, SearchScope
+from app.http_client import HttpClient, gather_bounded
+from app.sources.base import (
+    JobSource, RawJob, SearchScope, blocked_page_reason, is_no_results_page,
+)
 from app.sources.browser import BrowserRenderer
 from app.utils import (
     absolute_url,
@@ -99,19 +100,32 @@ class NaukriSource(JobSource):
                 "naukri unavailable: JSON API is gated and no browser is running "
                 "(install playwright and run `playwright install chromium`)",
             )
+            self.stats.fail("browser_unavailable")
+            self.finish_stats(0)
             return []
 
-        results = await asyncio.gather(
-            *(self._fetch_query(query) for query in queries), return_exceptions=True
+        results = await gather_bounded(
+            [self._fetch_query(query) for query in queries],
+            settings.naukri_query_concurrency,
         )
 
         jobs: list[RawJob] = []
         for query, result in zip(queries, results):
             if isinstance(result, BaseException):
                 logger.warning("Naukri query %r failed: %s", query, result)
+                self.stats.fail("query_exception")
                 continue
             jobs.extend(result)
-        return jobs
+
+        unique: dict[str, RawJob] = {}
+        for job in jobs:
+            key = job.external_id or job.apply_link
+            if key in unique:
+                self.stats.duplicates_skipped += 1
+            unique.setdefault(key, job)
+        deduped = list(unique.values())
+        self.finish_stats(len(deduped))
+        return deduped
 
     async def _probe_api(self) -> None:
         if self._api_ok is not None:
@@ -120,12 +134,20 @@ class NaukriSource(JobSource):
             self._api_ok = False
             return
 
-        payload = await self.client.get_json(
+        result = await self.client.fetch_json(
             SEARCH_API,
             params=self._api_params("software engineer", 1),
             headers={**API_HEADERS, "User-Agent": self.client.random_user_agent()},
         )
+        payload = result.value
         self._api_ok = isinstance(payload, dict) and bool(payload.get("jobDetails"))
+        if not result.ok:
+            reason = "api_gated" if result.status_code in {401, 403, 406, 429} else (
+                result.error or "api_probe_failed"
+            )
+            self.stats.warn(reason, blocked=reason == "api_gated")
+            if reason != "api_gated":
+                self.stats.network_failures += 1
         await self.report(
             0,
             "naukri JSON API available - using fast path"
@@ -135,6 +157,7 @@ class NaukriSource(JobSource):
 
     async def _fetch_query(self, query: str) -> list[RawJob]:
         jobs: list[RawJob] = []
+        page_signatures: set[tuple[str, ...]] = set()
         for page in range(1, self.pages + 1):
             if self.cancelled:
                 break
@@ -143,9 +166,20 @@ class NaukriSource(JobSource):
                 if self._api_ok
                 else await self._fetch_rendered_page(query, page)
             )
-            await self.report(1, f"naukri '{query}' page {page} -> {len(batch)}")
+            count = len(batch) if batch is not None else 0
+            await self.report(1, f"naukri '{query}' page {page} -> {count}")
+            if batch is None:
+                break
             if not batch:
                 break  # ran out of results for this term
+            signature = tuple(job.external_id or job.apply_link for job in batch)
+            if signature in page_signatures:
+                self.stats.repeated_pages += 1
+                self.stats.fail("repeated_page")
+                break
+            page_signatures.add(signature)
+            for job in batch:
+                job.discovered_query = query
             jobs.extend(batch)
         return jobs
 
@@ -167,8 +201,9 @@ class NaukriSource(JobSource):
             params["location"] = city
         return params
 
-    async def _fetch_api_page(self, query: str, page: int) -> list[RawJob]:
-        payload = await self.client.get_json(
+    async def _fetch_api_page(self, query: str, page: int) -> list[RawJob] | None:
+        self.stats.pages_attempted += 1
+        result = await self.client.fetch_json(
             SEARCH_API,
             params=self._api_params(query, page),
             headers={
@@ -177,13 +212,30 @@ class NaukriSource(JobSource):
                 "Referer": search_url(query, 1, self.scope.naukri_location_slug),
             },
         )
+        if not result.ok:
+            self.stats.fail(result.error or "network_error", network=True)
+            return None
+        payload = result.value
         if not isinstance(payload, dict):
-            return []
-        return [
+            self.stats.parse_failures += 1
+            self.stats.fail("unexpected_api_structure")
+            return None
+        details = payload.get("jobDetails")
+        if details is None:
+            self.stats.parse_failures += 1
+            self.stats.fail("missing_job_details")
+            return None
+        if not isinstance(details, list):
+            self.stats.parse_failures += 1
+            self.stats.fail("invalid_job_details")
+            return None
+        parsed = [
             job
-            for job in (self._parse_api_job(item) for item in payload.get("jobDetails") or [])
+            for job in (self._parse_api_job(item) for item in details)
             if job
         ]
+        self.stats.responses_accepted += 1
+        return parsed
 
     def _parse_api_job(self, item: dict) -> RawJob | None:
         if not isinstance(item, dict):
@@ -222,17 +274,33 @@ class NaukriSource(JobSource):
         )
 
     # ---------------------------------------------------------- rendered path
-    async def _fetch_rendered_page(self, query: str, page: int) -> list[RawJob]:
+    async def _fetch_rendered_page(self, query: str, page: int) -> list[RawJob] | None:
+        self.stats.pages_attempted += 1
         if self.renderer is None or not self.renderer.enabled:
-            return []
+            self.stats.fail("browser_unavailable")
+            return None
         html = await self.renderer.render(
             search_url(query, page, self.scope.naukri_location_slug),
             wait_for=CARD_SELECTOR,
             scrolls=3,
         )
         if not html:
+            self.stats.fail("render_failed", network=True)
+            return None
+        blocked = blocked_page_reason(html)
+        if blocked:
+            self.stats.fail(f"blocked:{blocked}", blocked=True)
+            return None
+        parsed = self.parse_search_html(html)
+        if not parsed and is_no_results_page(html):
+            self.stats.responses_accepted += 1
             return []
-        return self.parse_search_html(html)
+        if not parsed:
+            self.stats.parse_failures += 1
+            self.stats.fail("unexpected_search_markup")
+            return None
+        self.stats.responses_accepted += 1
+        return parsed
 
     def parse_search_html(self, html: str) -> list[RawJob]:
         soup = BeautifulSoup(html, "lxml")

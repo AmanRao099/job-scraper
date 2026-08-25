@@ -449,6 +449,18 @@ select {
   color: #6ee7b7;
 }
 
+.badge-international {
+  background: rgba(124, 58, 237, 0.14);
+  border-color: rgba(167, 139, 250, 0.35);
+  color: #c4b5fd;
+}
+
+.badge-masters {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(251, 191, 36, 0.32);
+  color: #fcd34d;
+}
+
 .skill {
   padding: 0.15rem 0.45rem;
   border-radius: 6px;

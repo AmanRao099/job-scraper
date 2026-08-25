@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -37,6 +38,15 @@ class JobOut(UTCModel):
     skills: list[str] = Field(default_factory=list)
     seniority: str
     work_mode: str
+    employment_type: str = "unknown"
+    degree_requirements: list[str] = Field(default_factory=list)
+    masters_match: bool = False
+    education_requirement: str = "not_stated"
+    country: str | None = None
+    is_abroad: bool = False
+    visa_sponsorship: str = "unknown"
+    work_authorization_required: bool = False
+    relocation_support: str = "unknown"
     experience_text: str
     experience_min: int | None = None
     experience_max: int | None = None
@@ -52,6 +62,10 @@ class JobOut(UTCModel):
 class JobDetail(JobOut):
     description: str = ""
     external_id: str | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+    discovered_profiles: list[str] = Field(default_factory=list)
+    discovered_queries: list[str] = Field(default_factory=list)
 
 
 class PageMeta(BaseModel):
@@ -83,6 +97,11 @@ class FiltersOut(BaseModel):
     locations: list[FacetValue]
     companies: list[FacetValue]
     skills: list[FacetValue]
+    countries: list[FacetValue]
+    education_requirements: list[FacetValue]
+    visa_sponsorships: list[FacetValue]
+    relocation_supports: list[FacetValue]
+    employment_types: list[FacetValue]
 
 
 class StatsOut(BaseModel):
@@ -97,11 +116,13 @@ class StatsOut(BaseModel):
 
 
 class ScrapeRequest(BaseModel):
-    sources: list[str] | None = Field(
-        default=None, description="Subset of enabled sources, e.g. ['naukri']"
+    sources: list[Annotated[str, Field(min_length=1, max_length=32)]] | None = Field(
+        default=None, max_length=10,
+        description="Subset of enabled sources, e.g. ['naukri']"
     )
-    queries: list[str] | None = Field(
-        default=None, description="Override the built-in search catalogue"
+    queries: list[Annotated[str, Field(min_length=1, max_length=120)]] | None = Field(
+        default=None, max_length=100,
+        description="Override the built-in search catalogue"
     )
     query_limit: int | None = Field(
         default=None, ge=1, le=500, description="Cap the number of queries (useful for smoke tests)"
@@ -110,7 +131,8 @@ class ScrapeRequest(BaseModel):
         default=None,
         description=(
             "Run a targeted profile instead of the nationwide sweep, e.g. "
-            "'bangalore-fresher-startups'. See GET /scrape/profiles."
+            "'bangalore-fresher-startups' or 'worldwide-masters-tech'. "
+            "See GET /scrape/profiles."
         ),
     )
 
@@ -122,8 +144,18 @@ class ScrapeProfileOut(BaseModel):
     location: str
     queries: list[str]
     query_count: int
-    max_experience_years: int
+    max_experience_years: int | None
     require_startup: bool
+    allow_any_experience: bool = False
+    require_abroad: bool = False
+    require_masters: bool = False
+    allowed_sources: list[str] = Field(default_factory=list)
+    require_tech: bool = True
+    freshness_days: int | None = None
+    max_pages_by_source: dict[str, int] = Field(default_factory=dict)
+    max_results: int | None = None
+    deduplication_scope: str = "global"
+    deactivate_unseen: bool = False
 
 
 class ScrapeRunOut(UTCModel):

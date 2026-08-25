@@ -19,28 +19,17 @@ import logging
 from types import TracebackType
 
 from app.config import settings
-from app.http_client import DEFAULT_USER_AGENTS
 
 logger = logging.getLogger(__name__)
 
 BLOCKED_ASSETS = "**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf,otf,mp4,webm,avi}"
 
 LAUNCH_ARGS = [
-    "--disable-blink-features=AutomationControlled",
-    "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
     "--disable-extensions",
     "--no-first-run",
 ]
-
-# Removes the most obvious `navigator.webdriver` tell before any page script runs.
-STEALTH_INIT = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'languages', {get: () => ['en-IN', 'en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-"""
-
 
 def playwright_available() -> bool:
     try:
@@ -77,12 +66,11 @@ class BrowserRenderer:
             self._playwright = await async_playwright().start()
             self._browser = await self._launch()
             self._context = await self._browser.new_context(
-                user_agent=DEFAULT_USER_AGENTS[0],
+                user_agent=settings.http_user_agent,
                 viewport={"width": 1440, "height": 900},
                 locale="en-IN",
                 timezone_id="Asia/Kolkata",
             )
-            await self._context.add_init_script(STEALTH_INIT)
             await self._context.route(BLOCKED_ASSETS, self._abort)
             self.enabled = True
             logger.info("Browser ready (channel=%s)", settings.browser_channel or "bundled")
@@ -156,13 +144,19 @@ class BrowserRenderer:
         async with self._semaphore:
             page = await self._context.new_page()
             try:
-                await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                response = await page.goto(
+                    url, timeout=timeout_ms, wait_until="domcontentloaded"
+                )
+                if response is not None and response.status >= 400:
+                    logger.info("Rendered %s returned HTTP %s", url, response.status)
                 if wait_for:
                     try:
                         await page.wait_for_selector(wait_for, timeout=15000)
                     except Exception:
                         logger.debug("Selector %r never appeared on %s", wait_for, url)
-                        return None
+                        # Return the page so the source can distinguish a real
+                        # empty result from CAPTCHA/access-denied/shape drift.
+                        return await page.content()
                 # Bounded scrolling for lazy-loaded cards, instead of the old
                 # blanket sleep(8) that ran whether or not it was needed.
                 for _ in range(scrolls):

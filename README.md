@@ -1,7 +1,8 @@
 # Tech Job Extraction API
 
-Aggregates entry-level IT and tech job postings from Naukri and LinkedIn into a
-local database, and serves them over a filterable, paginated REST API.
+Aggregates Indian entry-level IT jobs and targeted international technology
+jobs from Naukri and LinkedIn into a local database, then serves them over a
+filterable, paginated REST API.
 
 Scraping runs on a schedule in the background. Your frontend only ever reads
 from the database, so `GET /jobs` returns in milliseconds and no user waits for
@@ -87,6 +88,14 @@ Filterable, paginated listing.
 | `skill` | string, repeatable | **Conjunctive** — results match *all* listed skills |
 | `seniority` | string, repeatable | `intern`, `fresher`, `junior`, `mid`, `senior`, `lead` |
 | `work_mode` | string, repeatable | `onsite`, `hybrid`, `remote` |
+| `employment_type` | string, repeatable | `full_time`, `part_time`, `contract`, `temporary`, `internship`, `unknown` |
+| `country` | string, repeatable | Normalized country, e.g. `Germany`; repeated values use OR matching |
+| `is_abroad` | bool | International jobs only (`true`) or India/geographically unknown (`false`) |
+| `masters_match` | bool | Description contains a recognized Masters-equivalent degree |
+| `education_requirement` | string, repeatable | `required`, `preferred`, `accepted`, `mentioned`, `not_stated` |
+| `visa_sponsorship` | string, repeatable | `offered`, `not_offered`, `unknown` |
+| `relocation_support` | string, repeatable | `offered`, `not_offered`, `unknown` |
+| `work_authorization_required` | bool | Whether an explicit right-to-work requirement was detected |
 | `location` / `company` | string | Case-insensitive substring |
 | `min_experience` / `max_experience` | int | Years |
 | `posted_within_days` | int | 1–365 |
@@ -95,8 +104,17 @@ Filterable, paginated listing.
 | `order` | enum | `asc`, `desc` |
 | `page` / `page_size` | int | Defaults 1 / 25, max page size 200 |
 
+Repeated filters accept at most 25 values, free text is capped at 200
+characters, and page numbers are bounded. Invalid enum values return HTTP 422.
+
 ```bash
 curl "http://localhost:8000/jobs?category=Backend&skill=Python&skill=Django&max_experience=2&page_size=10"
+```
+
+International Masters jobs that explicitly offer sponsorship:
+
+```bash
+curl "http://localhost:8000/jobs?is_abroad=true&masters_match=true&visa_sponsorship=offered"
 ```
 
 ```json
@@ -226,6 +244,47 @@ Two consequences worth knowing:
 Adding a profile is one entry in `PROFILES` in `app/profiles.py`; the API, both
 UIs and the CLI pick it up with no further changes.
 
+### `worldwide-masters-tech`
+
+International technology roles at any experience level whose actual posting
+description mentions a recognized Masters-equivalent qualification.
+
+```bash
+python main.py scrape --profile worldwide-masters-tech
+
+curl -X POST localhost:8000/scrape/run -H 'content-type: application/json' \
+     -d '{"profile": "worldwide-masters-tech"}'
+```
+
+The profile uses LinkedIn, the existing international-capable source, and a
+compact catalogue spanning software/backend, AI/ML, data, research, cloud,
+cybersecurity, computer vision, and embedded systems. Its search location is
+worldwide and LinkedIn's entry-level filter is omitted. It does **not** issue a
+query per country and it does not use a country acceptance allowlist: any
+posting confidently classified outside India can pass. Coverage is still
+limited by LinkedIn's public guest results, query ranking, paging depth, rate
+limits, and the locations/descriptions employers publish.
+
+Search wording alone never qualifies a result. After collection, the stored
+description must contain one of `Masters degree`, `Master of Science`, `Master
+of Engineering`, `MS`, `MSc`, `MEng`, `Postgraduate degree`, `Advanced degree`,
+`M.Tech`/`MTech`, or `M.E.` in qualification context. `Scrum Master`, master
+data/records/branches, master services agreements, `MS SQL`, and ordinary `me`
+are excluded. Context near each degree classifies it as `required`, `preferred`,
+`accepted`, or `mentioned`.
+
+Jobs are international when their location identifies a non-India country or
+known foreign city/region, or the description explicitly offers worldwide
+remote eligibility. A bare `Remote` location remains geographically unknown.
+Indian cities and states are recognized even when the location omits `India`.
+Country normalization is best-effort; region-level evidence may set
+`is_abroad=true` while leaving `country` empty.
+
+The profile includes sponsorship values `offered`, `not_offered`, and `unknown`;
+it never filters on them. Negative sponsorship wording takes precedence over a
+generic mention. Work-authorization requirements and relocation support are
+stored independently.
+
 ---
 
 ## Sources
@@ -266,8 +325,13 @@ list. The ones that matter most:
 | `SCRAPE_INTERVAL_HOURS` | `6` | Background refresh cadence |
 | `NAUKRI_PAGES` / `LINKEDIN_PAGES` | `3` / `4` | Depth per search query (20 / 10 results per page) |
 | `CORS_ORIGINS` | localhost:5173 | **Must list your real frontend origin in production** |
+| `ALLOWED_HOSTS` | local hosts | **Must list public API hostnames in production** |
 | `ADMIN_TOKEN` | *(empty)* | Protects the scrape and maintenance endpoints |
+| `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `25` | Separate network timeouts |
+| `HTTP_RETRIES` / `HTTP_BACKOFF_MAX` | `3` / `20` | Transient retry policy; honors `Retry-After` |
+| `HTTP_MAX_RESPONSE_BYTES` | `5000000` | Decompressed response-size ceiling |
 | `DATABASE_URL` | SQLite in `./data` | Set to `postgresql+asyncpg://…` to switch |
+| `DATABASE_SSL_MODE` | `require` | Production PostgreSQL must use `verify-full` |
 
 Coverage is driven by `SEARCH_QUERIES` in `app/taxonomy.py` — about 95 role
 queries spanning development, data, AI/ML, cloud, QA, security, support,
@@ -301,7 +365,8 @@ Before exposing it publicly:
 
 1. Set `ADMIN_TOKEN` to a long random string.
 2. Set `CORS_ORIGINS` to your frontend's real origin (not `*`).
-3. Mount a persistent volume for `/app/data`.
+3. Set `ALLOWED_HOSTS` to the API hostname(s).
+4. Mount a persistent volume for `/app/data`.
 
 **Run one API worker.** The scheduler and the scrape lock are per-process, so
 multiple workers would run concurrent scrapes against the same SQLite file. To
@@ -315,6 +380,11 @@ single-instance service.
 ```bash
 python main.py serve [--port 8000] [--reload]
 python main.py scrape [--sources naukri linkedin] [--limit N] [--profile KEY]
+python main.py scrape --profile worldwide-masters-tech [--limit N]
+python main.py scrape --profile bangalore-fresher-startups [--limit N]
+python main.py reindex --dry-run          # report offline changes only
+python main.py reindex --batch-size 500   # checkpointed offline backfill
+python main.py reindex --start-after-id 10000
 python main.py stats
 python main.py export output/jobs.jsonl
 python main.py import output/jobs.jsonl    # backfill from the pre-2.0 format
@@ -324,18 +394,42 @@ python main.py import output/jobs.jsonl    # backfill from the pre-2.0 format
 
 ## How postings are processed
 
-1. **Collect** — every source runs concurrently; within a source, every search
-   query runs concurrently under a shared semaphore.
-2. **Normalise** — skills, category, seniority, work mode and an experience
-   range are derived from the title, description and recruiter tags.
+1. **Collect** — sources are isolated; query and request concurrency are
+   independently bounded. Retries apply only to transient failures. Block,
+   rate-limit, malformed-response and repeated-page outcomes are recorded.
+2. **Normalise** — skills, category, seniority, work mode, experience,
+   qualification context, country, sponsorship, authorization and relocation
+   signals are derived deterministically from stored posting text.
 3. **Filter** — non-tech roles, over-experienced roles, dead listings and stale
    postings are dropped. Every rejection is counted and reported in the run
    stats, so a coverage regression shows up instead of failing silently.
-4. **Dedup** — a fingerprint of `title|company|city` collapses the same posting
-   found under several search terms or on both boards; the richer record wins.
-5. **Persist** — one bulk fingerprint lookup, then a single batched write.
+4. **Dedup** — stable source ID, canonical URL, employer URL and then a
+   normalized composite identity are considered in that order. Distinct source
+   IDs stay distinct; cross-source matches merge provenance and richer content.
+5. **Persist** — bounded bulk identity lookups and checkpointed batches make
+   reruns idempotent without per-row queries or commits.
 6. **Age out** — postings not re-seen in `STALE_AFTER_DAYS` become inactive;
    after `PURGE_AFTER_DAYS` they are deleted.
+
+`python main.py reindex` recomputes derived classifications from stored columns
+without network requests or active-status changes. It traverses by stable
+primary-key cursor, commits checkpoints, skips unchanged rows, supports dry-run
+and can resume from a printed `last_id`. Profile eligibility is deliberately
+not re-applied globally.
+
+Run summaries distinguish complete, partial, cancelled and failed runs and
+include per-source pages, accepted responses, blocks, network/parse failures,
+duplicates and duration.
+
+### Interpretation limits
+
+* A Masters match means the posting mentioned a broadly equivalent credential;
+  it does **not** guarantee that the employer will accept an Indian M.Tech.
+* A foreign location does **not** guarantee visa eligibility.
+* `visa_sponsorship=unknown` means the posting did not state sponsorship—not
+  that sponsorship is available.
+* Country, qualification wording, and job-board coverage are best-effort. Open
+  the original board/employer apply link to confirm current requirements.
 
 ### Matching is word-boundary aware
 
@@ -353,9 +447,19 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-77 tests covering skill extraction, tech classification, categorisation,
-experience parsing, normalisation and dedup, the query layer, and the HTTP
-endpoints. They use a temporary database and make no network calls.
+242 tests covering qualification/international classification, skill and tech
+taxonomy, experience parsing, normalization and deduplication, profiles,
+HTTP retry/source recovery, additive migration/reindex, repository filters, and
+API validation. They use temporary databases and make no network calls.
+
+Run the reproducible 10,000-job diagnostic with:
+
+```bash
+python benchmarks/benchmark.py --size 10000
+```
+
+It reports classification/dedup time and peak memory, batch upsert, reindex,
+combined filtering and facet generation. Timings are diagnostic, not test gates.
 
 ---
 
