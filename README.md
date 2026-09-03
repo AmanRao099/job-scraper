@@ -405,7 +405,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-191 tests covering skill extraction, tech classification, categorisation,
+198 tests covering skill extraction, tech classification, categorisation,
 experience parsing, normalisation and dedup, the query layer, expiry and
 purging, and the HTTP endpoints. They use a temporary database and make no
 network calls — the expiry tests drive the classifier with synthetic

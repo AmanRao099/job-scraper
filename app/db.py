@@ -74,6 +74,21 @@ if settings.is_sqlite:
         cursor.close()
 
 
+def _backfill_statement(table_name: str, column_name: str):
+    """UPDATE that writes a newly added column's default into existing rows.
+
+    Built with `text()` so SQLAlchemy renders the bind parameter in each
+    driver's paramstyle. Writing this as `exec_driver_sql` hands the string to
+    the driver untouched, which silently works on sqlite3 (it accepts `:name`)
+    and fails on asyncpg (which wants `$1`) - a break no SQLite test can see.
+
+    Both names must already be quoted for the target dialect.
+    """
+    return text(
+        f"UPDATE {table_name} SET {column_name} = :fill WHERE {column_name} IS NULL"
+    )
+
+
 def _sync_added_columns(connection) -> None:
     """Add columns and indexes the models declare but an existing table lacks.
 
@@ -90,6 +105,7 @@ def _sync_added_columns(connection) -> None:
 
     inspector = inspect(connection)
     existing_tables = set(inspector.get_table_names())
+    quote = connection.dialect.identifier_preparer.quote
 
     for table in Base.metadata.sorted_tables:
         if table.name not in existing_tables:
@@ -99,12 +115,15 @@ def _sync_added_columns(connection) -> None:
         for column in table.columns:
             if column.name in present:
                 continue
+
+            table_name = quote(table.name)
+            column_name = quote(column.name)
             ddl = column.type.compile(connection.dialect)
             # Deliberately added nullable regardless of what the model says:
             # existing rows have no value to put there, and every backend
             # rejects a NOT NULL column added to a non-empty table.
             connection.exec_driver_sql(
-                f"ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl}"
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"
             )
             logger.info("Added column %s.%s", table.name, column.name)
 
@@ -114,10 +133,8 @@ def _sync_added_columns(connection) -> None:
             # Backfilling makes an old row indistinguishable from a new one.
             fill = getattr(column.default, "arg", None)
             if not column.nullable and isinstance(fill, (str, int, float, bool)):
-                connection.exec_driver_sql(
-                    f"UPDATE {table.name} SET {column.name} = :fill "
-                    f"WHERE {column.name} IS NULL",
-                    {"fill": fill},
+                connection.execute(
+                    _backfill_statement(table_name, column_name), {"fill": fill}
                 )
 
         present_indexes = {idx["name"] for idx in inspector.get_indexes(table.name)}
