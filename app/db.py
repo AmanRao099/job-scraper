@@ -74,12 +74,67 @@ if settings.is_sqlite:
         cursor.close()
 
 
+def _sync_added_columns(connection) -> None:
+    """Add columns and indexes the models declare but an existing table lacks.
+
+    `create_all` only creates whole tables, so a database written by an earlier
+    version keeps its old column set forever and every query naming a new
+    column fails. There is no migration tool here on purpose: every schema
+    change so far has been additive, and additive changes are expressible as
+    plain `ALTER TABLE ADD COLUMN`, which both SQLite and Postgres accept with
+    identical syntax. A destructive change (dropping or retyping a column) is
+    the point at which this stops being enough and Alembic earns its keep.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy.schema import CreateIndex
+
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue  # create_all just made it, in full
+
+        present = {col["name"] for col in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
+                continue
+            ddl = column.type.compile(connection.dialect)
+            # Deliberately added nullable regardless of what the model says:
+            # existing rows have no value to put there, and every backend
+            # rejects a NOT NULL column added to a non-empty table.
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl}"
+            )
+            logger.info("Added column %s.%s", table.name, column.name)
+
+            # A column the model declares non-optional with a scalar default
+            # would otherwise read back as NULL on every pre-existing row, and
+            # the response models validate those rows against the declared type.
+            # Backfilling makes an old row indistinguishable from a new one.
+            fill = getattr(column.default, "arg", None)
+            if not column.nullable and isinstance(fill, (str, int, float, bool)):
+                connection.exec_driver_sql(
+                    f"UPDATE {table.name} SET {column.name} = :fill "
+                    f"WHERE {column.name} IS NULL",
+                    {"fill": fill},
+                )
+
+        present_indexes = {idx["name"] for idx in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name in present_indexes:
+                continue
+            connection.execute(CreateIndex(index, if_not_exists=True))
+            logger.info("Created index %s", index.name)
+
+
 async def init_db() -> None:
-    """Create tables if they do not exist."""
+    """Create tables if they do not exist, and add any columns they are missing."""
     from app import models  # noqa: F401  - register mappers
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_sync_added_columns)
     logger.info("Database ready at %s", settings.database_url)
 
 

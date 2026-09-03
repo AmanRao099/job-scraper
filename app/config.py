@@ -118,6 +118,37 @@ class Settings(BaseSettings):
     # Inactive jobs older than this are deleted outright.
     purge_after_days: int = 60
 
+    # ----------------------------------------------------------- expiry
+    # Staleness alone is a slow signal: a posting pulled from the board the day
+    # after we scraped it stays servable for `stale_after_days` because nothing
+    # re-seeing it is indistinguishable from nothing looking for it. These
+    # settings drive the active checks that catch a dead posting in hours.
+    maintenance_enabled: bool = True
+    maintenance_interval_hours: float = 3.0
+
+    # Re-fetch each active posting's apply link and retire the ones the board
+    # has taken down. Off means the only expiry signal is age.
+    expiry_check_enabled: bool = True
+    # Postings probed per maintenance pass. The cap exists because both boards
+    # throttle by IP: the sweep must stay well under the budget a scrape needs.
+    expiry_check_batch: int = 250
+    # A posting is not re-probed until this long after its last check, so the
+    # batch rotates through the whole table instead of re-testing the same rows.
+    expiry_recheck_after_hours: float = 24.0
+    expiry_check_concurrency: int = 4
+    # Consecutive inconclusive probes (timeout, 429, block page) before a
+    # posting is retired. A single failure means nothing - being rate limited
+    # is not evidence that a job is gone - so never expire on one.
+    expiry_max_failures: int = 3
+    # Postings older than this are retired whichever way the probe goes. Both
+    # boards stop honouring applications well before this; keeping them costs
+    # the consumer a dead apply link.
+    expire_posting_after_days: int = 60
+    # Grace period between a posting being marked expired and being deleted.
+    # Non-zero so a wrongly retired posting can be revived by the next scrape
+    # instead of being re-inserted as brand new.
+    purge_expired_after_days: int = 3
+
     # ------------------------------------------------------------ scraping
     sources_enabled: CsvList = ["naukri", "linkedin"]
     # Concurrent outbound HTTP requests across the whole pipeline.

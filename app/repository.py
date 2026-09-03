@@ -107,6 +107,13 @@ async def upsert_jobs(session: AsyncSession, jobs: list[NormalizedJob]) -> Upser
             setattr(row, key, value)
         row.last_seen_at = now
         row.is_active = True
+        # Seeing a posting on the board again overrules whatever retired it.
+        # Clearing the failure counter matters as much as clearing the reason:
+        # otherwise a job that was unreachable twice during an outage carries
+        # those two strikes forever and the next single blip retires it.
+        row.expired_at = None
+        row.expiry_reason = ""
+        row.check_failures = 0
         row.search_blob = row.build_search_blob()
         result.updated += 1
 
@@ -138,6 +145,171 @@ async def purge_old(session: AsyncSession, days: int | None = None) -> int:
         delete(Job).where(Job.is_active.is_(False), Job.last_seen_at < cutoff)
     )
     return outcome.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
+# Expiry
+#
+# `deactivate_stale` retires a posting for not having been seen. That is a slow,
+# indirect signal - it fires `stale_after_days` after the board took the job
+# down, and only if a scrape actually covered the query that would have found
+# it. The functions below retire postings on direct evidence instead: the board
+# answering 404 for the apply link, or the posting simply being too old to be
+# honoured. Everything retired here carries a reason and an `expired_at`, so the
+# purge can wait out a grace period rather than deleting on the spot.
+# ---------------------------------------------------------------------------
+
+EXPIRY_AGED_OUT = "aged_out"
+EXPIRY_GONE = "gone"
+EXPIRY_UNREACHABLE = "unreachable"
+# Retired by `main.py reindex` because current rules no longer admit it.
+EXPIRY_REJECTED = "rejected"
+
+
+async def expire_jobs(session: AsyncSession, job_ids: list[int], reason: str) -> int:
+    """Retire specific postings with a recorded reason."""
+    if not job_ids:
+        return 0
+    outcome = await session.execute(
+        update(Job)
+        .where(Job.id.in_(job_ids), Job.is_active.is_(True))
+        .values(is_active=False, expired_at=utcnow(), expiry_reason=reason)
+    )
+    return outcome.rowcount or 0
+
+
+async def expire_aged_out(session: AsyncSession, days: int | None = None) -> int:
+    """Retire active postings whose posting date is beyond the honour window.
+
+    Only rows with a known `posted_at` qualify. A posting whose date the board
+    never gave us is left to the staleness path - guessing an age from
+    `first_seen_at` would retire jobs that were merely discovered late.
+    """
+    days = days if days is not None else settings.expire_posting_after_days
+    if not days:
+        return 0
+    cutoff = utcnow() - timedelta(days=days)
+    outcome = await session.execute(
+        update(Job)
+        .where(
+            Job.is_active.is_(True),
+            Job.posted_at.is_not(None),
+            Job.posted_at < cutoff,
+        )
+        .values(is_active=False, expired_at=utcnow(), expiry_reason=EXPIRY_AGED_OUT)
+    )
+    return outcome.rowcount or 0
+
+
+async def purge_expired(session: AsyncSession, days: int | None = None) -> int:
+    """Delete postings retired by the expiry path more than `days` ago.
+
+    Separate from `purge_old` because the clocks differ: that one waits out
+    `last_seen_at` on rows nothing has re-seen, while an expired row has proof
+    it is gone and only needs a short grace period in which a scrape could
+    contradict us.
+    """
+    days = days if days is not None else settings.purge_expired_after_days
+    cutoff = utcnow() - timedelta(days=days)
+    outcome = await session.execute(
+        delete(Job).where(
+            Job.is_active.is_(False),
+            Job.expired_at.is_not(None),
+            Job.expired_at < cutoff,
+        )
+    )
+    return outcome.rowcount or 0
+
+
+async def select_for_expiry_check(
+    session: AsyncSession,
+    limit: int | None = None,
+    recheck_after_hours: float | None = None,
+) -> list[Job]:
+    """Pick the active postings due for a liveness probe.
+
+    Never-checked rows sort first, then least-recently-checked, so successive
+    batches rotate through the whole table instead of re-probing the same head
+    of it. Rows checked within the window are skipped entirely - the boards
+    throttle by IP and this budget is shared with the scraper.
+    """
+    limit = limit if limit is not None else settings.expiry_check_batch
+    hours = (
+        recheck_after_hours
+        if recheck_after_hours is not None
+        else settings.expiry_recheck_after_hours
+    )
+    cutoff = utcnow() - timedelta(hours=hours)
+
+    stmt = (
+        select(Job)
+        .where(
+            Job.is_active.is_(True),
+            or_(Job.last_checked_at.is_(None), Job.last_checked_at < cutoff),
+        )
+        .order_by(Job.last_checked_at.asc().nulls_first(), Job.id.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def record_check(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    alive: bool | None,
+    max_failures: int | None = None,
+) -> bool:
+    """Record one probe result. Returns True if the posting was retired.
+
+    `alive=None` is the inconclusive case - a timeout, a 429, a block page. It
+    is counted rather than acted on, because being blocked is not evidence that
+    a job is gone; only `expiry_max_failures` of them in a row is treated as
+    one. A single alive result clears the counter.
+    """
+    max_failures = (
+        max_failures if max_failures is not None else settings.expiry_max_failures
+    )
+    job = await session.get(Job, job_id)
+    if job is None:
+        return False
+
+    now = utcnow()
+    job.last_checked_at = now
+
+    if alive is True:
+        job.check_failures = 0
+        # A posting the board still serves is one we have effectively re-seen.
+        job.last_seen_at = now
+        return False
+
+    if alive is False:
+        job.check_failures = 0
+        job.is_active = False
+        job.expired_at = now
+        job.expiry_reason = EXPIRY_GONE
+        return True
+
+    job.check_failures = (job.check_failures or 0) + 1
+    if job.check_failures < max_failures:
+        return False
+
+    job.is_active = False
+    job.expired_at = now
+    job.expiry_reason = EXPIRY_UNREACHABLE
+    return True
+
+
+async def expiry_breakdown(session: AsyncSession) -> list[dict]:
+    """Counts of retired postings by reason, for the stats endpoint."""
+    stmt = (
+        select(Job.expiry_reason, func.count(Job.id))
+        .where(Job.is_active.is_(False), Job.expired_at.is_not(None))
+        .group_by(Job.expiry_reason)
+        .order_by(func.count(Job.id).desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    return [{"value": reason or "unknown", "count": int(count)} for reason, count in rows]
 
 
 # ---------------------------------------------------------------------------

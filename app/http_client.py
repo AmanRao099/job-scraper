@@ -97,8 +97,16 @@ class HttpClient:
         params: dict | None = None,
         headers: dict | None = None,
         expect_json: bool = False,
+        allow_error_status: bool = False,
     ) -> httpx.Response | None:
-        """Perform a request with retry/backoff. Returns None if it never succeeded."""
+        """Perform a request with retry/backoff. Returns None if it never succeeded.
+
+        `allow_error_status` returns the response for a non-retryable 4xx rather
+        than None. Scraping does not care why a fetch failed, but the expiry
+        sweep does: 404 means the board deleted the posting, while 403 means it
+        blocked us, and retiring a job on the second would delete a live listing
+        every time we get rate limited.
+        """
         if self._client is None:
             raise RuntimeError("HttpClient must be used as an async context manager")
 
@@ -117,7 +125,7 @@ class HttpClient:
                         last_error = f"HTTP {response.status_code}"
                     elif response.status_code >= 400:
                         logger.debug("%s %s -> HTTP %s", method, url, response.status_code)
-                        return None
+                        return response if allow_error_status else None
                     elif expect_json and "json" not in response.headers.get(
                         "content-type", ""
                     ):

@@ -5,6 +5,7 @@
     python main.py scrape                # one-off scrape into the database
     python main.py scrape --limit 5      # smoke test with 5 search queries
     python main.py scrape --profile bangalore-fresher-startups   # targeted run
+    python main.py maintain              # retire + delete expired postings
     python main.py export jobs.jsonl     # dump the database
     python main.py import output/jobs.jsonl   # backfill from the old format
     python main.py stats                 # quick counts
@@ -210,6 +211,8 @@ async def _reindex(args: argparse.Namespace) -> int:
     from app.db import init_db, session_scope
     from app.models import Job
     from app.config import settings
+    from app.repository import EXPIRY_REJECTED
+    from app.utils import utcnow
     from app.taxonomy import (
         categorize,
         detect_seniority,
@@ -250,6 +253,10 @@ async def _reindex(args: argparse.Namespace) -> int:
                 too_senior or not is_tech_job(job.title, job.description, skills)
             ):
                 job.is_active = False
+                # Stamped like any other expiry so the purge can pick it up on
+                # the short grace period rather than waiting out last_seen_at.
+                job.expired_at = utcnow()
+                job.expiry_reason = EXPIRY_REJECTED
                 retired += 1
 
             category = categorize(job.title, job.description, skills)
@@ -280,10 +287,26 @@ async def _reindex(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _maintain(args: argparse.Namespace) -> int:
+    """Retire and delete postings that are no longer worth serving.
+
+    The same cycle the API server runs on a timer, exposed for deployments
+    where the server is not the thing that owns the database - a cron job or a
+    CI schedule can keep storage clean without an API running at all.
+    """
+    from app.db import init_db
+    from app.pipeline import run_maintenance
+
+    await init_db()
+    summary = await run_maintenance(verify=not args.no_verify, limit=args.limit)
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 async def _stats(_: argparse.Namespace) -> int:
     from app.db import SessionLocal, init_db
     from app.models import Job
-    from app.repository import count_jobs, group_counts, latest_run
+    from app.repository import count_jobs, expiry_breakdown, group_counts, latest_run
 
     await init_db()
     async with SessionLocal() as session:
@@ -291,6 +314,7 @@ async def _stats(_: argparse.Namespace) -> int:
         active = await count_jobs(session, active_only=True)
         by_category = await group_counts(session, Job.category)
         by_source = await group_counts(session, Job.source)
+        by_expiry = await expiry_breakdown(session)
         run = await latest_run(session)
 
     print(f"Jobs: {active} active / {total} total")
@@ -360,6 +384,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reindex.add_argument("--verbose", action="store_true")
     reindex.set_defaults(func=_reindex, is_async=True)
+
+    maintain = sub.add_parser(
+        "maintain", help="Retire and delete expired jobs (age pass, then link probes)"
+    )
+    maintain.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip the link probes and do the age-based pass only (no network)",
+    )
+    maintain.add_argument(
+        "--limit", type=int, default=None, metavar="N", help="Postings to probe"
+    )
+    maintain.set_defaults(func=_maintain, is_async=True)
 
     stats = sub.add_parser("stats", help="Show database counts")
     stats.set_defaults(func=_stats, is_async=True)

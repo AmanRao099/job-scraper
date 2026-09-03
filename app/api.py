@@ -25,11 +25,13 @@ from app import scheduler as sched
 from app.config import settings
 from app.db import SessionLocal, dispose_db, get_session, healthcheck, init_db
 from app.events import broker
+from app.expiry import verify_active_jobs
 from app.models import Job
 from app.pipeline import (
     HARD_CANCEL_GRACE_SECONDS,
     ScrapeAlreadyRunning,
     request_cancel,
+    run_maintenance,
     trigger_scrape,
 )
 from app.profiles import PROFILES
@@ -188,6 +190,15 @@ async def meta() -> dict:
             "interval_hours": settings.scrape_interval_hours,
             "next_run_at": sched.next_run_time(),
         },
+        "maintenance": {
+            "enabled": settings.maintenance_enabled,
+            "interval_hours": settings.maintenance_interval_hours,
+            "next_run_at": sched.next_maintenance_time(),
+            "verify_links": settings.expiry_check_enabled,
+            "stale_after_days": settings.stale_after_days,
+            "expire_posting_after_days": settings.expire_posting_after_days,
+            "purge_expired_after_days": settings.purge_expired_after_days,
+        },
     }
 
 
@@ -310,6 +321,7 @@ async def get_stats(session: AsyncSession = Depends(get_session)) -> StatsOut:
         by_source=await repo.group_counts(session, Job.source),
         by_seniority=await repo.group_counts(session, Job.seniority),
         top_skills=await repo.skill_counts(session, limit=25),
+        by_expiry_reason=await repo.expiry_breakdown(session),
         last_run=ScrapeRunOut.model_validate(last_run) if last_run else None,
     )
     repo.facet_cache.set("stats", payload)
@@ -476,13 +488,52 @@ async def stream_run(run_id: int, session: AsyncSession = Depends(get_session)) 
 async def cleanup_stale(
     stale_days: int = Query(None, ge=1, le=365),
     purge_days: int = Query(None, ge=1, le=730),
+    expire_days: int = Query(None, ge=1, le=730),
     session: AsyncSession = Depends(get_session),
 ) -> MessageOut:
+    """Age-based cleanup only. Runs no requests, so it is always cheap."""
     deactivated = await repo.deactivate_stale(session, stale_days)
+    aged_out = await repo.expire_aged_out(session, expire_days)
     purged = await repo.purge_old(session, purge_days)
+    purged += await repo.purge_expired(session)
     await session.commit()
     repo.facet_cache.clear()
     return MessageOut(
         message="Maintenance complete",
-        detail={"deactivated": deactivated, "purged": purged},
+        detail={"deactivated": deactivated, "aged_out": aged_out, "purged": purged},
     )
+
+
+@app.post(
+    "/jobs/maintenance/verify",
+    response_model=MessageOut,
+    tags=["scrape"],
+    dependencies=[Depends(require_admin)],
+)
+async def verify_links(
+    limit: int = Query(None, ge=1, le=2000, description="Postings to probe this pass"),
+    recheck_after_hours: float = Query(
+        None, ge=0, le=720, description="Skip postings probed more recently than this"
+    ),
+) -> MessageOut:
+    """Re-fetch a batch of apply links and retire the postings that are gone.
+
+    Synchronous rather than backgrounded: the batch is capped and the boards are
+    probed at low concurrency, so the call is bounded, and a caller running this
+    before an export wants the result before it exports.
+    """
+    report = await verify_active_jobs(limit=limit, recheck_after_hours=recheck_after_hours)
+    repo.facet_cache.clear()
+    return MessageOut(message="Verification complete", detail=report.as_dict())
+
+
+@app.post(
+    "/jobs/maintenance/run",
+    response_model=MessageOut,
+    tags=["scrape"],
+    dependencies=[Depends(require_admin)],
+)
+async def maintenance_run() -> MessageOut:
+    """Run the full maintenance cycle the scheduler runs: age pass, then probes."""
+    summary = await run_maintenance()
+    return MessageOut(message="Maintenance complete", detail=summary)

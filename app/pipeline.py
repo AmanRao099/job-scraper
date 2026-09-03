@@ -27,13 +27,16 @@ from app.enrich import normalize_many
 from app.events import broker
 from app.http_client import HttpClient
 from app.profiles import ScrapeProfile, resolve_profile
+from app.expiry import verify_active_jobs
 from app.repository import (
     UpsertResult,
     create_run,
     deactivate_stale,
+    expire_aged_out,
     facet_cache,
     finish_run,
     has_running_scrape,
+    purge_expired,
     purge_old,
     upsert_jobs,
 )
@@ -416,10 +419,63 @@ async def _persist(normalized: list) -> UpsertResult:
 
 
 async def _housekeeping() -> tuple[int, int]:
+    """The age-based half of maintenance: no network, safe after every run."""
     async with session_scope() as session:
         deactivated = await deactivate_stale(session)
+        deactivated += await expire_aged_out(session)
         purged = await purge_old(session)
+        purged += await purge_expired(session)
     return deactivated, purged
+
+
+async def run_maintenance(
+    *,
+    verify: bool | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Retire and delete postings that are no longer worth serving.
+
+    Two independent passes, in this order:
+
+    1. Age. Postings nothing has re-seen, and postings too old for the board to
+       still honour, are retired; anything retired long enough ago is deleted.
+       Pure SQL, so it always runs.
+    2. Liveness. A batch of active postings is re-fetched from the board and the
+       ones it no longer serves are retired on the spot. This is the pass that
+       catches a job deleted yesterday, which age alone cannot see for weeks.
+
+    Verification runs second so it never spends requests on rows the cheap pass
+    was about to retire anyway.
+    """
+    deactivated, purged = await _housekeeping()
+    summary: dict = {"deactivated": deactivated, "purged": purged}
+
+    should_verify = (
+        settings.expiry_check_enabled if verify is None else verify
+    )
+
+    if should_verify:
+        # The probes hit the same boards, from the same address, against the
+        # same rate limit as a scrape - and a scrape is the more valuable use
+        # of that budget. Overlap is rare at the default cadences, and skipping
+        # only defers this pass to the next window.
+        async with session_scope() as session:
+            running = await has_running_scrape(session)
+        if running is not None:
+            logger.info("Skipping link verification: scrape run %s is active", running.id)
+            summary["verified"] = {"skipped": "scrape_running"}
+            should_verify = False
+
+    if should_verify:
+        report = await verify_active_jobs(limit=limit)
+        summary["verified"] = report.as_dict()
+        if report.retired:
+            # Newly retired rows only become deletable after the grace period,
+            # so this pass does not re-purge - the next one does.
+            summary["expired"] = report.retired
+
+    facet_cache.clear()
+    return summary
 
 
 async def trigger_scrape(

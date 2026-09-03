@@ -52,6 +52,12 @@ class JobOut(UTCModel):
 class JobDetail(JobOut):
     description: str = ""
     external_id: str | None = None
+    # Only ever set on a retired posting, and only reachable through
+    # include_inactive. A consumer that sees one knows why it stopped being
+    # served rather than having to guess from `is_active` alone.
+    expired_at: datetime | None = None
+    expiry_reason: str = ""
+    last_checked_at: datetime | None = None
 
 
 class PageMeta(BaseModel):
@@ -93,6 +99,7 @@ class StatsOut(BaseModel):
     by_source: list[FacetValue]
     by_seniority: list[FacetValue]
     top_skills: list[FacetValue]
+    by_expiry_reason: list[FacetValue] = Field(default_factory=list)
     last_run: ScrapeRunOut | None = None
 
 

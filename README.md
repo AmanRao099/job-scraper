@@ -142,7 +142,9 @@ curl "http://localhost:8000/jobs?category=Backend&skill=Python&skill=Django&max_
 | `GET` | `/scrape/runs/{id}` | Status, progress, stats |
 | `POST` | `/scrape/runs/{id}/cancel` | Stop a running scrape, keeping partial results |
 | `GET` | `/scrape/runs/{id}/stream` | Live SSE log for one run |
-| `DELETE` | `/jobs/maintenance/stale` | Deactivate/purge on demand |
+| `DELETE` | `/jobs/maintenance/stale` | Age-based cleanup on demand (no requests) |
+| `POST` | `/jobs/maintenance/verify` | Re-check apply links, retire the dead ones |
+| `POST` | `/jobs/maintenance/run` | Full maintenance cycle: age pass, then link probes |
 
 `POST /scrape/run` and the maintenance endpoint require an `X-Admin-Token`
 header **when `ADMIN_TOKEN` is set**. It is unset by default so local
@@ -267,6 +269,8 @@ list. The ones that matter most:
 | `NAUKRI_PAGES` / `LINKEDIN_PAGES` | `3` / `4` | Depth per search query (20 / 10 results per page) |
 | `CORS_ORIGINS` | localhost:5173 | **Must list your real frontend origin in production** |
 | `ADMIN_TOKEN` | *(empty)* | Protects the scrape and maintenance endpoints |
+| `EXPIRY_CHECK_ENABLED` | `true` | Re-check apply links and retire dead postings |
+| `MAINTENANCE_INTERVAL_HOURS` | `3` | How often expired postings are retired and deleted |
 | `DATABASE_URL` | SQLite in `./data` | Set to `postgresql+asyncpg://…` to switch |
 
 Coverage is driven by `SEARCH_QUERIES` in `app/taxonomy.py` — about 95 role
@@ -318,6 +322,8 @@ python main.py scrape [--sources naukri linkedin] [--limit N] [--profile KEY]
 python main.py stats
 python main.py export output/jobs.jsonl
 python main.py import output/jobs.jsonl    # backfill from the pre-2.0 format
+python main.py maintain                   # retire + delete expired postings
+python main.py maintain --no-verify       # age-based pass only, no requests
 ```
 
 ---
@@ -334,8 +340,54 @@ python main.py import output/jobs.jsonl    # backfill from the pre-2.0 format
 4. **Dedup** — a fingerprint of `title|company|city` collapses the same posting
    found under several search terms or on both boards; the richer record wins.
 5. **Persist** — one bulk fingerprint lookup, then a single batched write.
-6. **Age out** — postings not re-seen in `STALE_AFTER_DAYS` become inactive;
-   after `PURGE_AFTER_DAYS` they are deleted.
+6. **Expire** — see below.
+
+### How dead postings are removed
+
+A posting is only worth serving while you can still apply to it, so storage is
+swept on its own schedule (`MAINTENANCE_INTERVAL_HOURS`, default 3) rather than
+as a step inside a scrape. That separation is the point: a scrape can fail, be
+cancelled, be throttled to nothing or run a narrow profile, and each of those
+would otherwise skip its own cleanup — exactly when dead postings pile up.
+
+Three signals retire a posting, in increasing order of directness:
+
+| Signal | Fires when | Setting |
+|---|---|---|
+| Not re-seen | No scrape has found it for weeks | `STALE_AFTER_DAYS` (21) |
+| Too old | Its posting date is past the honour window | `EXPIRE_POSTING_AFTER_DAYS` (60) |
+| Gone from the board | A re-fetch of the apply link says so | `EXPIRY_CHECK_ENABLED` |
+
+Only the third catches a job deleted yesterday. The first two are age clocks,
+and until one runs out, a posting the board pulled the day after we stored it
+is indistinguishable from one our queries simply did not cover — which is weeks
+of dead apply links for whatever consumes this API.
+
+So each pass re-fetches a batch of apply links (`EXPIRY_CHECK_BATCH`, oldest
+check first, so successive passes rotate through the whole table) and reads the
+answer:
+
+- **404 / 410, a redirect off the posting page, or "no longer accepting
+  applications" in the body** → gone. Retired immediately.
+- **A real posting page** → live. Its failure counter resets and `last_seen_at`
+  moves forward, exactly as a scrape would.
+- **Anything else — a timeout, a 429, a 403, a block page** → *undecidable*,
+  not "gone". Both boards throttle by IP and serve interstitials under load,
+  and a blocked request looks nothing like a deleted job. It takes
+  `EXPIRY_MAX_FAILURES` (3) of these in a row to retire a posting.
+
+That asymmetry is deliberate. Retiring a live posting costs a job someone could
+have applied to; keeping a dead one another few hours costs a wasted click.
+
+Retired rows are not deleted on the spot. They keep an `expired_at` and a
+reason, and are deleted `PURGE_EXPIRED_AFTER_DAYS` (3) later — long enough for
+the next scrape to contradict a wrong verdict, which revives the row in place
+and clears its expiry rather than re-inserting it as brand new. Nothing retired
+is ever served: `GET /jobs` filters on `is_active` unless you pass
+`include_inactive`.
+
+Run it by hand with `python main.py maintain` (add `--no-verify` for the
+age-only pass, which makes no requests at all).
 
 ### Matching is word-boundary aware
 
@@ -353,9 +405,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-77 tests covering skill extraction, tech classification, categorisation,
-experience parsing, normalisation and dedup, the query layer, and the HTTP
-endpoints. They use a temporary database and make no network calls.
+191 tests covering skill extraction, tech classification, categorisation,
+experience parsing, normalisation and dedup, the query layer, expiry and
+purging, and the HTTP endpoints. They use a temporary database and make no
+network calls — the expiry tests drive the classifier with synthetic
+responses.
 
 ---
 

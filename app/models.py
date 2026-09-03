@@ -100,6 +100,21 @@ class Job(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
+    # expiry. `is_active` says whether we serve the posting; these say why it
+    # stopped being served and when, which is what makes the purge safe to
+    # automate - a row retired an hour ago by a flaky probe is still young
+    # enough for the next scrape to revive it.
+    expired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    expiry_reason: Mapped[str] = mapped_column(String(32), default="")
+    # When the apply link was last probed, and how many probes in a row came
+    # back inconclusive. NULL means never checked, which sorts first.
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    check_failures: Mapped[int] = mapped_column(Integer, default=0)
+
     # Lowercase haystack for LIKE search. Free text spans the whole string;
     # skills are additionally pipe-delimited so they can be matched exactly.
     search_blob: Mapped[str] = mapped_column(Text, default="")
@@ -108,6 +123,8 @@ class Job(Base):
         Index("ix_jobs_active_posted", "is_active", "posted_at"),
         Index("ix_jobs_category_active", "category", "is_active"),
         Index("ix_jobs_source_active", "source", "is_active"),
+        # The expiry sweep's selection query: active rows, oldest check first.
+        Index("ix_jobs_active_checked", "is_active", "last_checked_at"),
     )
 
     def build_search_blob(self) -> str:

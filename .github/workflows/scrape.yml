@@ -44,9 +44,9 @@ jobs:
       SCHEDULER_ENABLED: "false"
       PLAYWRIGHT_FALLBACK: "true"
       PLAYWRIGHT_HEADLESS: "true"
-      # Optional: enables the cleanup step at the end. Both are repo secrets.
-      API_URL: ${{ secrets.API_URL }}
-      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      # Both the API server and this workflow may run maintenance; a run that
+      # collides simply finds the other one's rows already retired.
+      MAINTENANCE_ENABLED: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -99,16 +99,16 @@ jobs:
         if: success()
         run: python main.py reindex
 
+      # Retires postings that stopped appearing in results (stale_after_days)
+      # and ones the board is no longer serving, then deletes what has been
+      # retired long enough. Run here rather than through the API because this
+      # runner already holds the database credentials, and because the link
+      # probes should come from the address that just scraped the same boards
+      # rather than from the API host.
+      - name: Retire and delete expired postings
+        if: success()
+        run: python main.py maintain
+
       - name: Show database totals
         if: always()
         run: python main.py stats
-
-      # Ages out postings that stopped appearing in results (stale_after_days)
-      # and deletes long-dead ones (purge_after_days). Skipped automatically
-      # when the API secrets are not configured.
-      - name: Retire stale postings
-        if: success() && env.API_URL != ''
-        run: |
-          curl -fsS -X DELETE "$API_URL/jobs/maintenance/stale" \
-            -H "X-Admin-Token: $ADMIN_TOKEN" \
-            --max-time 180 --retry 3 --retry-connrefused
